@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+# hatch-vcs writes this at build time (version derived from git tags)
+src/argus_forge/_version.py

@@ -1,0 +1,21 @@
+# Managed by Copier — do not edit by hand.
+# Run `copier update` in this repo to pull template changes.
+_commit: 281bd55
+_src_path: /home/smk/argus-pkg-template
+author: smk762
+cli_name: argus-forge
+description: 'Training bridge: turn curated dataset exports into ready-to-run LoRA
+    training configs (kohya_ss / OneTrainer / diffusers)'
+dockerfile: Dockerfile
+github_owner: smk762
+has_cli: true
+has_server: true
+image_name: argus-forge
+package_name: argus_forge
+post_test: uv run --no-sync argus-forge schema --check
+project_name: argus-forge
+python_min: '3.11'
+ruff_pin: 0.15.16
+test_extras: dev,server,cli
+version_build_arg: false
+

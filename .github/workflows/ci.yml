@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    uses: smk762/argus-ci/.github/workflows/python-ci.yml@v1
+    with:
+      ruff-version: "0.15.16"
+      test-extras: "dev,server,cli"
+      post-test: "uv run --no-sync argus-forge schema --check"
+

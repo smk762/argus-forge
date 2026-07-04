@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import pytest
+from conftest import ExportFactory
 from fastapi.testclient import TestClient
 
 from argus_forge.server import create_app
-
-from conftest import ExportFactory
 
 
 @pytest.fixture

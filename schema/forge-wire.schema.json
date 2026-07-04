@@ -1,0 +1,693 @@
+{
+  "$defs": {
+    "DatasetInfo": {
+      "description": "What forge found in an export directory.",
+      "properties": {
+        "caption_count": {
+          "title": "Caption Count",
+          "type": "integer"
+        },
+        "export_dir": {
+          "title": "Export Dir",
+          "type": "string"
+        },
+        "image_count": {
+          "title": "Image Count",
+          "type": "integer"
+        },
+        "manifest_present": {
+          "title": "Manifest Present",
+          "type": "boolean"
+        },
+        "manifest_rows": {
+          "default": 0,
+          "title": "Manifest Rows",
+          "type": "integer"
+        },
+        "manifest_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Manifest Version"
+        },
+        "missing_from_disk": {
+          "default": 0,
+          "title": "Missing From Disk",
+          "type": "integer"
+        },
+        "size_hint": {
+          "$ref": "#/$defs/SizeHint"
+        },
+        "suggested": {
+          "$ref": "#/$defs/TrainingParams"
+        },
+        "target_profile": {
+          "$ref": "#/$defs/TargetProfile"
+        }
+      },
+      "required": [
+        "export_dir",
+        "image_count",
+        "caption_count",
+        "manifest_present",
+        "size_hint",
+        "suggested"
+      ],
+      "title": "DatasetInfo",
+      "type": "object"
+    },
+    "ForgeRequest": {
+      "description": "POST /config \u2014 render trainer configs for an export directory.",
+      "properties": {
+        "base_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Base Model"
+        },
+        "category": {
+          "anyOf": [
+            {
+              "enum": [
+                "identity",
+                "wardrobe",
+                "pose_composition",
+                "setting"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Category"
+        },
+        "collect_captions": {
+          "default": true,
+          "title": "Collect Captions",
+          "type": "boolean"
+        },
+        "dry_run": {
+          "default": false,
+          "title": "Dry Run",
+          "type": "boolean"
+        },
+        "export_dir": {
+          "title": "Export Dir",
+          "type": "string"
+        },
+        "output_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Name"
+        },
+        "overrides": {
+          "$ref": "#/$defs/ParamOverrides"
+        },
+        "trainer": {
+          "enum": [
+            "kohya",
+            "onetrainer",
+            "diffusers"
+          ],
+          "title": "Trainer",
+          "type": "string"
+        },
+        "trigger": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Trigger"
+        }
+      },
+      "required": [
+        "export_dir",
+        "trainer"
+      ],
+      "title": "ForgeRequest",
+      "type": "object"
+    },
+    "ForgeResult": {
+      "description": "Everything a caller (CLI, UI) needs to show or run the forged config.",
+      "properties": {
+        "base_model": {
+          "title": "Base Model",
+          "type": "string"
+        },
+        "captions_collected": {
+          "default": 0,
+          "title": "Captions Collected",
+          "type": "integer"
+        },
+        "dataset": {
+          "$ref": "#/$defs/DatasetInfo"
+        },
+        "export_dir": {
+          "title": "Export Dir",
+          "type": "string"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/GeneratedFile"
+          },
+          "title": "Files",
+          "type": "array"
+        },
+        "out_dir": {
+          "title": "Out Dir",
+          "type": "string"
+        },
+        "output_name": {
+          "title": "Output Name",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/$defs/TrainingParams"
+        },
+        "trainer": {
+          "enum": [
+            "kohya",
+            "onetrainer",
+            "diffusers"
+          ],
+          "title": "Trainer",
+          "type": "string"
+        },
+        "trigger": {
+          "title": "Trigger",
+          "type": "string"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "trainer",
+        "export_dir",
+        "out_dir",
+        "files",
+        "params",
+        "dataset",
+        "base_model",
+        "trigger",
+        "output_name"
+      ],
+      "title": "ForgeResult",
+      "type": "object"
+    },
+    "GeneratedFile": {
+      "description": "One rendered file. ``name`` is relative to the export dir; ``path`` is\nthe absolute location once written (None on dry runs).",
+      "properties": {
+        "content": {
+          "title": "Content",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Path"
+        }
+      },
+      "required": [
+        "name",
+        "content"
+      ],
+      "title": "GeneratedFile",
+      "type": "object"
+    },
+    "InspectRequest": {
+      "description": "POST /inspect \u2014 look at an export dir without writing anything.",
+      "properties": {
+        "category": {
+          "anyOf": [
+            {
+              "enum": [
+                "identity",
+                "wardrobe",
+                "pose_composition",
+                "setting"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Category"
+        },
+        "export_dir": {
+          "title": "Export Dir",
+          "type": "string"
+        }
+      },
+      "required": [
+        "export_dir"
+      ],
+      "title": "InspectRequest",
+      "type": "object"
+    },
+    "ManifestRow": {
+      "description": "One line of the curator's ``manifest.jsonl`` (the fields forge consumes).\n\nUnknown keys are ignored so a minor-version manifest with extra columns\nstill parses; a major-version bump is rejected up front in\n:func:`argus_forge.manifest.read_manifest`.",
+      "properties": {
+        "abs_path": {
+          "title": "Abs Path",
+          "type": "string"
+        },
+        "manifest_version": {
+          "title": "Manifest Version",
+          "type": "string"
+        },
+        "primary_face_cluster": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Primary Face Cluster"
+        },
+        "primary_face_pose": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Primary Face Pose"
+        },
+        "rel_path": {
+          "title": "Rel Path",
+          "type": "string"
+        },
+        "score": {
+          "default": 0.0,
+          "title": "Score",
+          "type": "number"
+        },
+        "similar_group": {
+          "default": 0,
+          "title": "Similar Group",
+          "type": "integer"
+        },
+        "target_profile": {
+          "$ref": "#/$defs/TargetProfile"
+        }
+      },
+      "required": [
+        "manifest_version",
+        "rel_path",
+        "abs_path"
+      ],
+      "title": "ManifestRow",
+      "type": "object"
+    },
+    "ParamOverrides": {
+      "description": "Optional user overrides; anything unset keeps the heuristic value.",
+      "properties": {
+        "batch_size": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Batch Size"
+        },
+        "epochs": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Epochs"
+        },
+        "network_alpha": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Network Alpha"
+        },
+        "network_dim": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Network Dim"
+        },
+        "optimizer": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Optimizer"
+        },
+        "precision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Precision"
+        },
+        "repeats": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Repeats"
+        },
+        "resolution": {
+          "anyOf": [
+            {
+              "minimum": 64,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resolution"
+        },
+        "scheduler": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scheduler"
+        },
+        "text_encoder_lr": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text Encoder Lr"
+        },
+        "unet_lr": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unet Lr"
+        }
+      },
+      "title": "ParamOverrides",
+      "type": "object"
+    },
+    "SizeHint": {
+      "description": "Dataset-size guidance for the target category (mirrors the curate UI).",
+      "properties": {
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "tone": {
+          "enum": [
+            "empty",
+            "low",
+            "good",
+            "high"
+          ],
+          "title": "Tone",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tone",
+        "text"
+      ],
+      "title": "SizeHint",
+      "type": "object"
+    },
+    "TargetProfile": {
+      "description": "What the dataset was curated *for* \u2014 inherited verbatim from argus-curator.",
+      "properties": {
+        "checkpoint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Checkpoint"
+        },
+        "target_backend": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "sdxl",
+          "title": "Target Backend"
+        },
+        "target_category": {
+          "default": "identity",
+          "enum": [
+            "identity",
+            "wardrobe",
+            "pose_composition",
+            "setting"
+          ],
+          "title": "Target Category",
+          "type": "string"
+        },
+        "target_style": {
+          "default": "photo",
+          "enum": [
+            "photo",
+            "anime"
+          ],
+          "title": "Target Style",
+          "type": "string"
+        }
+      },
+      "title": "TargetProfile",
+      "type": "object"
+    },
+    "TrainerInfo": {
+      "description": "Catalogue entry for GET /trainers.",
+      "properties": {
+        "files": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Files",
+          "type": "array"
+        },
+        "id": {
+          "enum": [
+            "kohya",
+            "onetrainer",
+            "diffusers"
+          ],
+          "title": "Id",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "notes": {
+          "title": "Notes",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "files",
+        "notes"
+      ],
+      "title": "TrainerInfo",
+      "type": "object"
+    },
+    "TrainingParams": {
+      "description": "Resolved hyperparameters for one LoRA run.\n\n``total_steps`` counts sample presentations (images x repeats x epochs) \u2014\nthe number the curate UI displays; ``optimizer_steps`` divides by batch\nsize, which is what trainers actually count.",
+      "properties": {
+        "batch_size": {
+          "title": "Batch Size",
+          "type": "integer"
+        },
+        "epochs": {
+          "title": "Epochs",
+          "type": "integer"
+        },
+        "images": {
+          "title": "Images",
+          "type": "integer"
+        },
+        "network_alpha": {
+          "title": "Network Alpha",
+          "type": "integer"
+        },
+        "network_dim": {
+          "title": "Network Dim",
+          "type": "integer"
+        },
+        "optimizer": {
+          "title": "Optimizer",
+          "type": "string"
+        },
+        "optimizer_steps": {
+          "title": "Optimizer Steps",
+          "type": "integer"
+        },
+        "precision": {
+          "title": "Precision",
+          "type": "string"
+        },
+        "repeats": {
+          "title": "Repeats",
+          "type": "integer"
+        },
+        "resolution": {
+          "title": "Resolution",
+          "type": "integer"
+        },
+        "scheduler": {
+          "title": "Scheduler",
+          "type": "string"
+        },
+        "text_encoder_lr": {
+          "title": "Text Encoder Lr",
+          "type": "number"
+        },
+        "total_steps": {
+          "title": "Total Steps",
+          "type": "integer"
+        },
+        "unet_lr": {
+          "title": "Unet Lr",
+          "type": "number"
+        }
+      },
+      "required": [
+        "images",
+        "repeats",
+        "epochs",
+        "total_steps",
+        "optimizer_steps",
+        "network_dim",
+        "network_alpha",
+        "unet_lr",
+        "text_encoder_lr",
+        "optimizer",
+        "scheduler",
+        "resolution",
+        "batch_size",
+        "precision"
+      ],
+      "title": "TrainingParams",
+      "type": "object"
+    }
+  },
+  "title": "argus-forge wire contract"
+}

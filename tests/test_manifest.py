@@ -3,11 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from conftest import PNG_1PX, ExportFactory
 
 from argus_forge.manifest import find_images, inspect_export, read_manifest
 from argus_forge.models import ForgeError
-
-from conftest import PNG_1PX, ExportFactory
 
 
 def test_inspect_with_manifest(export_factory: ExportFactory) -> None:

@@ -3,11 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from conftest import ExportFactory
 from typer.testing import CliRunner
 
 from argus_forge.cli import app
-
-from conftest import ExportFactory
 
 runner = CliRunner()
 

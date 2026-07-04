@@ -84,12 +84,12 @@ def emit(ctx: EmitContext) -> list[GeneratedFile]:
         ]
     )
 
-    train_sh = f"""#!/usr/bin/env bash
+    train_sh = """#!/usr/bin/env bash
 # argus-forge launcher for kohya-ss/sd-scripts (SDXL LoRA).
 # Run from a sd-scripts checkout, or point SD_SCRIPTS_DIR at one.
 set -euo pipefail
-HERE="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-cd "${{SD_SCRIPTS_DIR:-.}}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SD_SCRIPTS_DIR:-.}"
 accelerate launch --num_cpu_threads_per_process=2 sdxl_train_network.py \\
   --config_file "$HERE/config.toml" \\
   --dataset_config "$HERE/dataset.toml"

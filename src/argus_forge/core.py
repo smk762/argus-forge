@@ -73,13 +73,10 @@ def forge_config(req: ForgeRequest) -> ForgeResult:
 
     warnings: list[str] = []
     if info.missing_from_disk:
-        warnings.append(
-            f"{info.missing_from_disk}/{info.manifest_rows} manifest rows have no exported image on disk"
-        )
+        warnings.append(f"{info.missing_from_disk}/{info.manifest_rows} manifest rows have no exported image on disk")
     if info.manifest_present and info.manifest_rows != info.image_count:
         warnings.append(
-            f"manifest lists {info.manifest_rows} images but {info.image_count} were found — "
-            "forging for what's on disk"
+            f"manifest lists {info.manifest_rows} images but {info.image_count} were found — forging for what's on disk"
         )
 
     captions_collected = 0
@@ -100,7 +97,9 @@ def forge_config(req: ForgeRequest) -> ForgeResult:
     base_model = req.base_model or profile.checkpoint or DEFAULT_BASE_MODELS.get(backend)
     if base_model is None:
         base_model = DEFAULT_BASE_MODELS["sdxl"]
-        warnings.append(f"no default base model for backend {backend!r} — wrote the SDXL base; override with base_model")
+        warnings.append(
+            f"no default base model for backend {backend!r} — wrote the SDXL base; override with base_model"
+        )
     if backend != "sdxl":
         warnings.append(f"heuristics are tuned for SDXL; manifest targets {backend!r} — review lr/resolution")
 

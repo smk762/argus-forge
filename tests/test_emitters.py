@@ -5,11 +5,10 @@ import os
 import tomllib
 
 import pytest
+from conftest import ExportFactory
 
 from argus_forge.core import forge_config, slugify
 from argus_forge.models import ForgeError, ForgeRequest, ParamOverrides
-
-from conftest import ExportFactory
 
 
 def test_slugify() -> None:

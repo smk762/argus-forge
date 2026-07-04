@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
+
+import structlog
 
 try:
     import typer
@@ -17,6 +20,13 @@ app = typer.Typer(
     help="Training bridge: turn curated dataset exports into ready-to-run LoRA training configs.",
     no_args_is_help=True,
 )
+
+
+@app.callback()
+def _cli(verbose: bool = Option(False, "--verbose", "-v", help="Show info/debug logs")) -> None:
+    """Keep stdout clean for --json output; ``serve`` re-enables info logs."""
+    level = logging.DEBUG if verbose else logging.WARNING
+    structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(level))
 
 
 @app.command()
@@ -202,6 +212,7 @@ def serve(
 
     from argus_forge.server import create_app
 
+    structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
     application = create_app(cors=cors)
     uvicorn.run(application, host=host, port=port)
 

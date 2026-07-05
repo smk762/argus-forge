@@ -17,8 +17,8 @@ import structlog
 from argus_forge.heuristics import dataset_size_status, suggest_training_params
 from argus_forge.models import (
     CAPTION_EXT,
-    MANIFEST_VERSION,
     SUPPORTED_EXTS,
+    SUPPORTED_MANIFEST_MAJORS,
     DatasetInfo,
     ForgeError,
     ManifestRow,
@@ -42,7 +42,7 @@ def _manifest_major(version: str) -> str:
 def read_manifest(path: Path) -> list[ManifestRow]:
     """Parse ``manifest.jsonl``, refusing an incompatible major version."""
     rows: list[ManifestRow] = []
-    expected_major = _manifest_major(MANIFEST_VERSION)
+    understood = ", ".join(f"{m}.x" for m in SUPPORTED_MANIFEST_MAJORS)
     with path.open(encoding="utf-8") as f:
         for lineno, line in enumerate(f, start=1):
             line = line.strip()
@@ -52,10 +52,16 @@ def read_manifest(path: Path) -> list[ManifestRow]:
                 row = ManifestRow.model_validate(json.loads(line))
             except Exception as exc:
                 raise ForgeError(f"{path.name}:{lineno}: unreadable manifest row: {exc}") from exc
-            if _manifest_major(row.manifest_version) != expected_major:
+            major = _manifest_major(row.manifest_version)
+            if major not in SUPPORTED_MANIFEST_MAJORS:
                 raise ForgeError(
                     f"{path.name}:{lineno}: manifest_version {row.manifest_version} is not supported "
-                    f"(this build understands {expected_major}.x) — upgrade argus-forge or re-export"
+                    f"(this build understands {understood}) — upgrade argus-forge or re-export"
+                )
+            if major != "1" and row.exported_path is None:
+                raise ForgeError(
+                    f"{path.name}:{lineno}: manifest_version {row.manifest_version} row has no exported_path "
+                    f"— the manifest is malformed; re-export with argus-curator"
                 )
             rows.append(row)
     return rows
@@ -87,9 +93,16 @@ def caption_path(image: Path) -> Path:
 def exported_location(export_dir: Path, row: ManifestRow) -> Path | None:
     """Where *row*'s image landed inside the export dir, or None if absent.
 
-    Exports write either ``<dest>/<rel_path>`` (structure preserved) or
-    ``<dest>/<basename>`` (flattened) — probe both.
+    2.x rows carry ``exported_path`` — the exact destination the curator
+    wrote (flattened exports de-collide shared basenames to
+    ``stem-<hash>.ext``, so it cannot be re-derived from ``rel_path``). A miss
+    there means the file has since gone from disk. 1.x rows predate the
+    field: exports wrote either ``<dest>/<rel_path>`` (structure preserved)
+    or ``<dest>/<basename>`` (flattened) — probe both.
     """
+    if row.exported_path is not None:
+        exported = export_dir / row.exported_path
+        return exported if exported.is_file() else None
     preserved = export_dir / row.rel_path
     if preserved.is_file():
         return preserved
@@ -111,9 +124,10 @@ def resolve_rows(export_dir: Path, rows: list[ManifestRow]) -> list[Path | None]
 def exported_collisions(rows: list[ManifestRow], resolved: list[Path | None]) -> dict[Path, list[str]]:
     """Exported files that two or more *distinct* manifest rows resolve to.
 
-    A flattened export collides when selections share a basename: the curator
-    silently keeps the last-written pixels, so any caption pairing for that
-    file is ambiguous. Maps each colliding exported file to the ``rel_path``
+    A 1.x flattened export collides when selections share a basename: the
+    curator silently kept the last-written pixels, so any caption pairing for
+    that file is ambiguous. 2.x exports de-collide destinations curator-side,
+    so this is a defensive guard for 1.x and hand-built export dirs. Maps each colliding exported file to the ``rel_path``
     of every row claiming it, in manifest order. Rows with an identical
     ``rel_path`` are one selection listed twice, not a collision — they are
     deduplicated, not flagged.

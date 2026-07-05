@@ -23,7 +23,7 @@ def test_inspect(export_factory: ExportFactory) -> None:
     result = runner.invoke(app, ["inspect", str(export)])
     assert result.exit_code == 0
     assert "27 (3 captioned)" in result.output
-    assert "manifest: v1.0" in result.output
+    assert "manifest: v2.0" in result.output
 
 
 def test_inspect_json(export_factory: ExportFactory) -> None:

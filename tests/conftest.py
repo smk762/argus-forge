@@ -40,7 +40,7 @@ def export_factory(tmp_path: Path) -> ExportFactory:
         category: str = "identity",
         checkpoint: str | None = None,
         preserve_structure: bool = False,
-        manifest_version: str = "1.0",
+        manifest_version: str = "2.0",
         name: str = "myset",
     ) -> Path:
         export = tmp_path / name
@@ -62,23 +62,25 @@ def export_factory(tmp_path: Path) -> ExportFactory:
             if i < captions:
                 dest.with_suffix(".txt").write_text(f"caption {i}", encoding="utf-8")
 
-            rows.append(
-                {
-                    "manifest_version": manifest_version,
-                    "rel_path": rel,
-                    "abs_path": str(src),
-                    "target_profile": {
-                        "target_style": "photo",
-                        "target_backend": "sdxl",
-                        "checkpoint": checkpoint,
-                        "target_category": category,
-                    },
-                    "primary_face_cluster": None,
-                    "primary_face_pose": None,
-                    "score": 0.9,
-                    "similar_group": i,
-                }
-            )
+            row = {
+                "manifest_version": manifest_version,
+                "rel_path": rel,
+                "abs_path": str(src),
+                "target_profile": {
+                    "target_style": "photo",
+                    "target_backend": "sdxl",
+                    "checkpoint": checkpoint,
+                    "target_category": category,
+                },
+                "primary_face_cluster": None,
+                "primary_face_pose": None,
+                "score": 0.9,
+                "similar_group": i,
+            }
+            # 2.x manifests carry the real destination; 1.x rows predate it.
+            if not manifest_version.startswith("1."):
+                row["exported_path"] = rel
+            rows.append(row)
 
         if manifest:
             lines = "\n".join(json.dumps(r) for r in rows)

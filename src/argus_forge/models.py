@@ -26,10 +26,14 @@ TRAINERS: tuple[TrainerId, ...] = ("kohya", "onetrainer", "diffusers")
 
 SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
-# Major version of the curator handoff manifest this build understands.
+# Major versions of the curator handoff manifest this build understands.
 # argus-curator stamps every row with its MANIFEST_VERSION; forge refuses a
-# manifest whose major differs instead of misreading it.
-MANIFEST_VERSION = "1.0"
+# manifest whose major is not listed here instead of misreading it.
+# 2.x: rows carry ``exported_path`` (the real destination under the export
+#      root, de-collided by the curator) and exist only for files whose
+#      transfer succeeded. 1.x: legacy — destinations are re-derived from
+#      ``rel_path`` by probing.
+SUPPORTED_MANIFEST_MAJORS: tuple[str, ...] = ("1", "2")
 
 # Caption sidecar extension (argus-lens writes these next to the images).
 CAPTION_EXT = ".txt"
@@ -63,6 +67,11 @@ class ManifestRow(BaseModel):
     manifest_version: str
     rel_path: str
     abs_path: str
+    # Where the file actually landed under the export root (posix, relative).
+    # Required on 2.x rows — flattened exports de-collide basenames to
+    # ``stem-<hash>.ext``, so it cannot be re-derived from rel_path. Absent
+    # on 1.x rows, which predate the field.
+    exported_path: str | None = None
     target_profile: TargetProfile = Field(default_factory=TargetProfile)
     primary_face_cluster: str | None = None
     primary_face_pose: str | None = None

@@ -55,11 +55,17 @@ def config(
         "--collect-captions/--no-collect-captions",
         help="Copy .txt sidecars from manifest source paths into the export",
     ),
+    path_map: list[str] = Option(
+        [],
+        "--path-map",
+        help="Rewrite a path prefix in emitted configs, as CONTAINER=HOST (one entry per flag; also FORGE_PATH_MAP env)",
+    ),
     dry_run: bool = Option(False, "--dry-run", help="Print rendered files without writing anything"),
     as_json: bool = Option(False, "--json", help="Print the full ForgeResult as JSON"),
 ) -> None:
     """Emit a ready-to-run training config for a curated export."""
-    from argus_forge.core import forge_config
+    from argus_forge.core import forge_config, path_map_entry
+    from argus_forge.emitters.base import map_path
     from argus_forge.models import ForgeError, ForgeRequest, ParamOverrides
 
     overrides = ParamOverrides(
@@ -85,6 +91,8 @@ def config(
             category=category,  # type: ignore[arg-type]
             overrides=overrides,
             collect_captions=collect_captions,
+            # One entry per flag, parsed individually — paths may contain commas.
+            path_map=dict(path_map_entry(entry, source="--path-map") for entry in path_map),
             dry_run=dry_run,
         )
         result = forge_config(req)
@@ -119,7 +127,15 @@ def config(
             typer.echo(f"  wrote {f.path}")
         run_hint = next((f.path for f in result.files if f.name.endswith("train.sh")), None)
         if run_hint:
-            typer.echo(f"\nNext: review {result.out_dir}/README.md, then run {run_hint}")
+            # The next step runs where the *mapped* paths live, so hint with those
+            # even though the "wrote" lines above are forge's own (real) locations.
+            from argus_forge.core import resolve_path_map
+
+            effective_map = resolve_path_map(req.path_map)
+            typer.echo(
+                f"\nNext: review {map_path(result.out_dir, effective_map)}/README.md, "
+                f"then run {map_path(run_hint, effective_map)}"
+            )
 
 
 @app.command()
@@ -210,9 +226,22 @@ def serve(
         typer.echo("Server requires: pip install argus-forge[server]", err=True)
         raise typer.Exit(1) from _exc
 
+    from argus_forge.core import env_path_map
+    from argus_forge.models import ForgeError
     from argus_forge.server import create_app
 
     structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
+    try:
+        env_path_map()  # fail fast at startup, not as a 400 on every /config
+    except ForgeError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    if not cors:
+        typer.echo(
+            "CORS is disabled — browser clients (e.g. the argus-studio frontend on :3000) "
+            "will fail with 'Failed to fetch'; pass --cors to allow them.",
+            err=True,
+        )
     application = create_app(cors=cors)
     uvicorn.run(application, host=host, port=port)
 

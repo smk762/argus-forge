@@ -99,6 +99,32 @@ def exported_location(export_dir: Path, row: ManifestRow) -> Path | None:
     return None
 
 
+def resolve_rows(export_dir: Path, rows: list[ManifestRow]) -> list[Path | None]:
+    """:func:`exported_location` for every row, in manifest order.
+
+    Resolution costs 1-2 stat() calls per row, so callers that need both the
+    collision set and caption destinations should resolve once and share.
+    """
+    return [exported_location(export_dir, row) for row in rows]
+
+
+def exported_collisions(rows: list[ManifestRow], resolved: list[Path | None]) -> dict[Path, list[str]]:
+    """Exported files that two or more *distinct* manifest rows resolve to.
+
+    A flattened export collides when selections share a basename: the curator
+    silently keeps the last-written pixels, so any caption pairing for that
+    file is ambiguous. Maps each colliding exported file to the ``rel_path``
+    of every row claiming it, in manifest order. Rows with an identical
+    ``rel_path`` are one selection listed twice, not a collision — they are
+    deduplicated, not flagged.
+    """
+    claims: dict[Path, dict[str, None]] = {}
+    for row, dest in zip(rows, resolved, strict=True):
+        if dest is not None:
+            claims.setdefault(dest, {})[row.rel_path] = None
+    return {dest: list(rels) for dest, rels in claims.items() if len(rels) > 1}
+
+
 def inspect_export(
     export_dir: Path,
     category: TargetCategory | None = None,
@@ -112,7 +138,7 @@ def inspect_export(
 
     images = find_images(export_dir)
     captions = sum(1 for img in images if caption_path(img).is_file())
-    missing = sum(1 for row in rows if exported_location(export_dir, row) is None)
+    missing = resolve_rows(export_dir, rows).count(None)
 
     profile = rows[0].target_profile.model_copy() if rows else TargetProfile()
     if category is not None:

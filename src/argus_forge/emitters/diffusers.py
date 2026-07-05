@@ -54,7 +54,7 @@ SCRIPT="${{DIFFUSERS_SCRIPT:-train_text_to_image_lora_sdxl.py}}"
 accelerate launch "$SCRIPT" \\
   --pretrained_model_name_or_path={sh(ctx.base_model)} \\
   --pretrained_vae_model_name_or_path=madebyollin/sdxl-vae-fp16-fix \\
-  --train_data_dir={sh(str(ctx.export_dir))} \\
+  --train_data_dir={sh(ctx.mapped(ctx.export_dir))} \\
   --caption_column=text \\
   --resolution={p.resolution} \\
 {flip_flag}  --train_batch_size={p.batch_size} \\
@@ -83,6 +83,7 @@ accelerate launch "$SCRIPT" \\
 - diffusers counts optimizer steps, so `--max_train_steps={p.optimizer_steps}`
   (= {p.total_steps} samples / batch {p.batch_size}).
 - The fp16-fix VAE is pinned because SDXL's stock VAE is unstable in half precision.
+{ctx.path_note()}
 
 ```bash
 DIFFUSERS_SCRIPT=~/diffusers/examples/text_to_image/train_text_to_image_lora_sdxl.py bash train.sh

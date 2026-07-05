@@ -34,6 +34,10 @@ MANIFEST_VERSION = "1.0"
 # Caption sidecar extension (argus-lens writes these next to the images).
 CAPTION_EXT = ".txt"
 
+# Env var holding a default path_map as "container=host[,container=host...]"
+# (the compose file sets it from OUTPUT_DIR). Request-level maps win over it.
+PATH_MAP_ENV = "FORGE_PATH_MAP"
+
 
 class ForgeError(RuntimeError):
     """A user-facing failure: bad input dir, unreadable manifest, bad request."""
@@ -149,6 +153,11 @@ class ForgeRequest(BaseModel):
     # Copy caption sidecars that argus-lens wrote next to the *source* images
     # (manifest abs_path) into the export dir, where trainers expect them.
     collect_captions: bool = True
+    # Prefix rewrites for absolute paths rendered into configs, e.g.
+    # {"/data/out": "/home/you/argus/out"} when forge runs in a container but
+    # the trainer runs on the host. Longest prefix wins; merged over the
+    # FORGE_PATH_MAP env var ("container=host,container2=host2").
+    path_map: dict[str, str] = Field(default_factory=dict)
     # Render and return file contents without touching the filesystem.
     dry_run: bool = False
 

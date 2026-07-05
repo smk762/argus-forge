@@ -28,6 +28,10 @@ Along the way it:
 - validates the manifest (`manifest_version`-aware — refuses an incompatible major),
 - **collects captions**: argus-lens writes `.txt` sidecars next to the *source* images, so forge copies them
   next to the exported copies trainers actually read,
+- warns when a flattened export collided on basenames (several manifest rows -> one file on disk) and leaves
+  the ambiguous file uncaptioned instead of pairing it with the wrong caption,
+- emits one kohya subset per image directory (kohya's glob doesn't recurse — a structure-preserving export
+  would otherwise train zero images),
 - falls back gracefully to a bare folder of images with no manifest,
 - resolves the base checkpoint from the manifest's `target_profile.checkpoint` (or the SDXL base).
 
@@ -52,7 +56,15 @@ argus-forge trainers                                   # list emitters
 
 ## Server (argus-studio integration)
 
-`argus-forge serve` starts a FastAPI micro-server on **:8103** (peer to lens :8100, curator :8101, quarry :8102):
+Start the FastAPI micro-server on **:8103** (peer to lens :8100, curator :8101, quarry :8102):
+
+```bash
+argus-forge serve --cors
+```
+
+`--cors` matters: the studio frontend calls forge **cross-origin** (browser on :3000 → forge on :8103), and
+CORS is opt-in — without it the ExportPanel fails with "Failed to fetch" even though `curl` works fine.
+(The Docker image passes `--cors` already; this applies to the pip-installed path.)
 
 | Route | Purpose |
 | ----- | ------- |
@@ -63,6 +75,23 @@ argus-forge trainers                                   # list emitters
 
 The `/curate` page's ExportPanel in [argus-studio](https://github.com/smk762/argus-studio) uses this to forge a
 config right after an export (`docker compose --profile forge up`).
+
+### Container ↔ host paths (`path_map`)
+
+When forge runs in the compose stack it sees container paths (`/data/out/...`), but the emitted `train.sh` /
+configs are meant to run **on the host**, where those paths don't exist. Tell forge how to translate:
+
+```bash
+# per request (CLI: repeatable --path-map; API: "path_map" on POST /config)
+argus-forge config /data/out --path-map /data/out=$HOME/argus/out
+
+# or once, via the environment (the compose file can set this from OUTPUT_DIR)
+FORGE_PATH_MAP=/data/out=$HOME/argus/out argus-forge serve --cors
+```
+
+Every absolute path rendered into configs (`image_dir`, `output_dir`, `--train_data_dir`, OneTrainer concept
+paths, ...) gets the longest matching prefix rewritten; the request-level map wins over the env var. The
+emitted README notes whether a remap was applied.
 
 ## Develop
 

@@ -16,6 +16,13 @@ PNG_1PX = base64.b64decode(
 ExportFactory = Callable[..., Path]
 
 
+@pytest.fixture(autouse=True)
+def _isolate_path_map_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """forge_config reads FORGE_PATH_MAP; a value exported in the developer's
+    shell (as the README suggests for serve) must not leak into tests."""
+    monkeypatch.delenv("FORGE_PATH_MAP", raising=False)
+
+
 @pytest.fixture
 def export_factory(tmp_path: Path) -> ExportFactory:
     """Build a curator-shaped export dir: images, optional sidecars, manifest.

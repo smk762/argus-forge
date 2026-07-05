@@ -19,31 +19,38 @@ def emit(ctx: EmitContext) -> list[GeneratedFile]:
     p = ctx.params
     warmup = math.floor(0.05 * p.optimizer_steps)
 
-    dataset_toml = toml_lines(
-        [
-            "# argus-forge dataset config for kohya sd-scripts (pass via --dataset_config)",
-            f"# {ctx.steps_comment()}",
-            "",
-            "[general]",
-            ("enable_bucket", True),
-            ("caption_extension", ".txt"),
-            ("shuffle_caption", False),
-            ("keep_tokens", 0),
-            "",
-            "[[datasets]]",
-            ("resolution", p.resolution),
-            ("batch_size", p.batch_size),
-            ("min_bucket_reso", 256),
-            ("max_bucket_reso", 2048),
-            ("bucket_reso_steps", 64),
+    # kohya's subset image glob is non-recursive, so a nested export (curator's
+    # preserve_structure) needs one subset per image-bearing directory — a
+    # single root subset would train zero images.
+    subset_dirs = sorted({img.parent for img in ctx.images}) or [ctx.export_dir]
+
+    lines: list[tuple[str, object] | str] = [
+        "# argus-forge dataset config for kohya sd-scripts (pass via --dataset_config)",
+        f"# {ctx.steps_comment()}",
+        "",
+        "[general]",
+        ("enable_bucket", True),
+        ("caption_extension", ".txt"),
+        ("shuffle_caption", False),
+        ("keep_tokens", 0),
+        "",
+        "[[datasets]]",
+        ("resolution", p.resolution),
+        ("batch_size", p.batch_size),
+        ("min_bucket_reso", 256),
+        ("max_bucket_reso", 2048),
+        ("bucket_reso_steps", 64),
+    ]
+    for d in subset_dirs:
+        lines += [
             "",
             "[[datasets.subsets]]",
-            ("image_dir", str(ctx.export_dir)),
+            ("image_dir", ctx.mapped(d)),
             ("num_repeats", p.repeats),
             "# Fallback caption for images without a .txt sidecar.",
             ("class_tokens", ctx.trigger),
         ]
-    )
+    dataset_toml = toml_lines(lines)
 
     config_toml = toml_lines(
         [
@@ -105,11 +112,13 @@ accelerate launch --num_cpu_threads_per_process=2 sdxl_train_network.py \\
 | `config.toml` | training args (`--config_file`) |
 | `train.sh` | `accelerate launch sdxl_train_network.py` wiring both |
 
-- Images (and `.txt` caption sidecars) are read from `{ctx.export_dir}`.
+- Images (and `.txt` caption sidecars) are read from `{ctx.mapped(ctx.export_dir)}`
+  ({len(subset_dirs)} subset{"s" if len(subset_dirs) != 1 else ""} — kohya doesn't recurse, so each image directory gets its own).
 - Images without a sidecar fall back to `class_tokens = {ctx.trigger!r}`.
 - Base model: `{ctx.base_model}` — edit `pretrained_model_name_or_path` to
   point at a local checkpoint if you don't want the HF download.
 - The LoRA lands in `output/` as `{ctx.output_name}.safetensors`.
+{ctx.path_note()}
 
 ```bash
 SD_SCRIPTS_DIR=~/kohya-ss/sd-scripts bash train.sh

@@ -6,6 +6,7 @@ thin shells around it.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 from pathlib import Path
@@ -17,6 +18,7 @@ from argus_forge.heuristics import apply_overrides
 from argus_forge.manifest import (
     FORGE_DIR_NAME,
     caption_path,
+    exported_collisions,
     exported_location,
     find_images,
     inspect_export,
@@ -37,12 +39,37 @@ def slugify(name: str) -> str:
     return slug or "dataset"
 
 
-def collect_captions(export_dir: Path, rows: list[ManifestRow], dry_run: bool) -> int:
+PATH_MAP_ENV = "FORGE_PATH_MAP"
+
+
+def parse_path_map(spec: str) -> dict[str, str]:
+    """Parse ``container=host[,container=host...]`` into a prefix map."""
+    mapping: dict[str, str] = {}
+    for pair in spec.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        src, sep, dst = pair.partition("=")
+        if not sep or not src.strip() or not dst.strip():
+            raise ForgeError(f"bad path_map entry {pair!r} — expected 'container/prefix=host/prefix'")
+        mapping[src.strip()] = dst.strip()
+    return mapping
+
+
+def resolve_path_map(req_map: dict[str, str]) -> dict[str, str]:
+    """The request's path_map merged over the FORGE_PATH_MAP env default."""
+    return {**parse_path_map(os.environ.get(PATH_MAP_ENV, "")), **req_map}
+
+
+def collect_captions(export_dir: Path, rows: list[ManifestRow], dry_run: bool, skip: set[Path] | None = None) -> int:
     """Copy ``.txt`` sidecars written next to the *source* images into the export.
 
     argus-lens captions the manifest's ``abs_path`` entries, so sidecars land
     beside the originals — not beside the exported copies trainers read. This
-    closes that gap. Existing sidecars in the export are never overwritten.
+    closes that gap. Existing sidecars in the export are never overwritten,
+    and files in *skip* (basename collisions — see :func:`exported_collisions`)
+    are left uncaptioned rather than paired with a caption that may describe
+    different pixels.
     """
     copied = 0
     for row in rows:
@@ -50,7 +77,7 @@ def collect_captions(export_dir: Path, rows: list[ManifestRow], dry_run: bool) -
         if not src_caption.is_file():
             continue
         dest_img = exported_location(export_dir, row)
-        if dest_img is None:
+        if dest_img is None or (skip and dest_img in skip):
             continue
         dest_caption = caption_path(dest_img)
         if dest_caption.exists():
@@ -67,6 +94,8 @@ def forge_config(req: ForgeRequest) -> ForgeResult:
     if req.trainer not in EMITTERS:
         raise ForgeError(f"unknown trainer: {req.trainer} (expected one of {', '.join(EMITTERS)})")
 
+    path_map = resolve_path_map(req.path_map)
+
     info, rows = inspect_export(export_dir, category=req.category)
     if info.image_count == 0:
         raise ForgeError(f"no images found under {export_dir} (supported: {', '.join(sorted(SUPPORTED_EXTS))})")
@@ -79,9 +108,17 @@ def forge_config(req: ForgeRequest) -> ForgeResult:
             f"manifest lists {info.manifest_rows} images but {info.image_count} were found — forging for what's on disk"
         )
 
+    collisions = exported_collisions(export_dir, rows)
+    for dest, rels in sorted(collisions.items()):
+        warnings.append(
+            f"basename collision: {', '.join(rels)} all resolve to {dest.relative_to(export_dir)} — "
+            "only one image survived the flattened export and its caption pairing is ambiguous "
+            "(skipped caption collection for it); re-export with folder structure preserved"
+        )
+
     captions_collected = 0
     if req.collect_captions and rows:
-        captions_collected = collect_captions(export_dir, rows, dry_run=req.dry_run)
+        captions_collected = collect_captions(export_dir, rows, dry_run=req.dry_run, skip=set(collisions))
         if captions_collected and req.dry_run:
             warnings.append(f"dry run: {captions_collected} caption sidecars would be collected from sources")
 
@@ -117,6 +154,7 @@ def forge_config(req: ForgeRequest) -> ForgeResult:
         output_name=output_name,
         images=find_images(export_dir),
         warnings=warnings,
+        path_map=path_map,
     )
     files = EMITTERS[req.trainer](ctx)
 

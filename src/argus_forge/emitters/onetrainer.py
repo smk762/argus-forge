@@ -32,7 +32,7 @@ def emit(ctx: EmitContext) -> list[GeneratedFile]:
     concepts = [
         {
             "name": ctx.trigger,
-            "path": str(ctx.export_dir),
+            "path": ctx.mapped(ctx.export_dir),
             "seed": -1,
             "enabled": True,
             "include_subdirectories": True,
@@ -77,7 +77,7 @@ def emit(ctx: EmitContext) -> list[GeneratedFile]:
 
 | File | Purpose |
 | ---- | ------- |
-| `concepts.json` | one concept: `{ctx.export_dir}`, {p.repeats}x REPEATS balancing, prompts from `.txt` sidecars |
+| `concepts.json` | one concept: `{ctx.mapped(ctx.export_dir)}`, {p.repeats}x REPEATS balancing, prompts from `.txt` sidecars |
 | `config.json` | **partial** training config (LoRA, {p.epochs} epochs, rank {p.network_dim}/{p.network_alpha}, lr {p.unet_lr}) |
 
 Load `config.json` in OneTrainer (File -> Load Config); anything not set here
@@ -87,6 +87,8 @@ OneTrainer's config schema evolves faster than this exporter.
 Images without a `.txt` sidecar get no prompt under `prompt_source: sample`;
 either caption them with argus-lens first or switch the concept's prompt
 source to a single prompt like `{ctx.caption_fallback()}`.
+
+{ctx.path_note()}
 """
 
     return [

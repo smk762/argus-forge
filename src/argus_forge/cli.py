@@ -55,11 +55,16 @@ def config(
         "--collect-captions/--no-collect-captions",
         help="Copy .txt sidecars from manifest source paths into the export",
     ),
+    path_map: list[str] = Option(
+        [],
+        "--path-map",
+        help="Rewrite a path prefix in emitted configs, as CONTAINER=HOST (repeatable; also FORGE_PATH_MAP env)",
+    ),
     dry_run: bool = Option(False, "--dry-run", help="Print rendered files without writing anything"),
     as_json: bool = Option(False, "--json", help="Print the full ForgeResult as JSON"),
 ) -> None:
     """Emit a ready-to-run training config for a curated export."""
-    from argus_forge.core import forge_config
+    from argus_forge.core import forge_config, parse_path_map
     from argus_forge.models import ForgeError, ForgeRequest, ParamOverrides
 
     overrides = ParamOverrides(
@@ -85,6 +90,7 @@ def config(
             category=category,  # type: ignore[arg-type]
             overrides=overrides,
             collect_captions=collect_captions,
+            path_map=parse_path_map(",".join(path_map)),
             dry_run=dry_run,
         )
         result = forge_config(req)
@@ -213,6 +219,12 @@ def serve(
     from argus_forge.server import create_app
 
     structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
+    if not cors:
+        typer.echo(
+            "CORS is disabled — browser clients (e.g. the argus-studio frontend on :3000) "
+            "will fail with 'Failed to fetch'; pass --cors to allow them.",
+            err=True,
+        )
     application = create_app(cors=cors)
     uvicorn.run(application, host=host, port=port)
 

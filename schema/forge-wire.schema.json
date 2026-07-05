@@ -124,6 +124,13 @@
         "overrides": {
           "$ref": "#/$defs/ParamOverrides"
         },
+        "path_map": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Path Map",
+          "type": "object"
+        },
         "trainer": {
           "enum": [
             "kohya",

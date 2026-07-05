@@ -1,0 +1,21 @@
+# argus-forge dataset config for kohya sd-scripts (pass via --dataset_config)
+# 30 images x 7 repeats x 10 epochs = 2100 samples (1050 optimizer steps @ batch 2)
+
+[general]
+enable_bucket = true
+caption_extension = ".txt"
+shuffle_caption = false
+keep_tokens = 0
+
+[[datasets]]
+resolution = 1024
+batch_size = 2
+min_bucket_reso = 256
+max_bucket_reso = 2048
+bucket_reso_steps = 64
+
+[[datasets.subsets]]
+image_dir = "/data/out"
+num_repeats = 7
+# Fallback caption for images without a .txt sidecar.
+class_tokens = "myset"

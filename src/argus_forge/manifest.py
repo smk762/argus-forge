@@ -99,6 +99,22 @@ def exported_location(export_dir: Path, row: ManifestRow) -> Path | None:
     return None
 
 
+def exported_collisions(export_dir: Path, rows: list[ManifestRow]) -> dict[Path, list[str]]:
+    """Exported files that two or more manifest rows resolve to.
+
+    A flattened export collides when selections share a basename: the curator
+    silently keeps the last-written pixels, so any caption pairing for that
+    file is ambiguous. Maps each colliding exported file to the ``rel_path``
+    of every row claiming it, in manifest order.
+    """
+    claims: dict[Path, list[str]] = {}
+    for row in rows:
+        dest = exported_location(export_dir, row)
+        if dest is not None:
+            claims.setdefault(dest, []).append(row.rel_path)
+    return {dest: rels for dest, rels in claims.items() if len(rels) > 1}
+
+
 def inspect_export(
     export_dir: Path,
     category: TargetCategory | None = None,

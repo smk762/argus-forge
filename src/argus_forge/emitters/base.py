@@ -27,6 +27,9 @@ class EmitContext:
     output_name: str
     images: list[Path]
     warnings: list[str] = field(default_factory=list)
+    # Prefix rewrites applied to every absolute path rendered into configs
+    # (container path -> host path), longest prefix wins. See ForgeRequest.path_map.
+    path_map: dict[str, str] = field(default_factory=dict)
 
     @property
     def category(self) -> TargetCategory:
@@ -38,7 +41,32 @@ class EmitContext:
 
     def abs_out(self, name: str) -> str:
         """Absolute path of an output file (for cross-references inside configs)."""
-        return str(self.export_dir / self.out_rel / name)
+        return self.mapped(self.export_dir / self.out_rel / name)
+
+    def mapped(self, path: Path | str) -> str:
+        """*path* with ``path_map`` prefix rewrites applied (longest match wins).
+
+        Configs are often forged inside a container but run on the host; this
+        is where ``/data/out/...`` becomes ``/home/you/argus/out/...``.
+        """
+        s = str(path)
+        for src in sorted(self.path_map, key=len, reverse=True):
+            prefix = src.rstrip("/")
+            if prefix and (s == prefix or s.startswith(prefix + "/")):
+                return self.path_map[src].rstrip("/") + s[len(prefix) :]
+        return s
+
+    def path_note(self) -> str:
+        """README blurb explaining whether config paths were remapped."""
+        if self.path_map:
+            pairs = ", ".join(f"`{src}` -> `{dst}`" for src, dst in sorted(self.path_map.items()))
+            return f"- Absolute paths in these files were remapped for the host: {pairs}."
+        return (
+            "- Absolute paths in these files are as seen by the process that ran forge. "
+            "If that was a container (e.g. the compose stack), they will not exist on the "
+            "host — re-forge with `path_map` (or set `FORGE_PATH_MAP=container=host`) to "
+            "rewrite them."
+        )
 
     def file(self, name: str, content: str) -> GeneratedFile:
         return GeneratedFile(name=self.out(name), content=content)

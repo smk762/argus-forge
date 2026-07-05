@@ -10,13 +10,15 @@ category and checkpoint then come from CLI/API arguments or defaults.
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath
 
 import structlog
+from pydantic import ValidationError
 
 from argus_forge.heuristics import dataset_size_status, suggest_training_params
 from argus_forge.models import (
     CAPTION_EXT,
+    MAJORS_REQUIRING_EXPORTED_PATH,
     SUPPORTED_EXTS,
     SUPPORTED_MANIFEST_MAJORS,
     DatasetInfo,
@@ -24,6 +26,7 @@ from argus_forge.models import (
     ManifestRow,
     TargetCategory,
     TargetProfile,
+    manifest_major,
 )
 
 logger = structlog.get_logger()
@@ -35,14 +38,19 @@ MANIFEST_NAME = "manifest.jsonl"
 FORGE_DIR_NAME = "forge"
 
 
-def _manifest_major(version: str) -> str:
-    return version.split(".", 1)[0]
-
-
 def read_manifest(path: Path) -> list[ManifestRow]:
-    """Parse ``manifest.jsonl``, refusing an incompatible major version."""
+    """Parse ``manifest.jsonl``, rejecting a manifest forge cannot trust.
+
+    Each failure names the offending line: a row whose major version is not in
+    :data:`SUPPORTED_MANIFEST_MAJORS`; a row that breaks the
+    :class:`ManifestRow` contract (a version that requires ``exported_path`` but
+    omits it, or an ``exported_path`` that is empty/absolute/escapes the export
+    root — validated on the model); and a file that mixes major versions, which
+    is a corrupt concatenation rather than one handoff.
+    """
     rows: list[ManifestRow] = []
     understood = ", ".join(f"{m}.x" for m in SUPPORTED_MANIFEST_MAJORS)
+    first_major: str | None = None
     with path.open(encoding="utf-8") as f:
         for lineno, line in enumerate(f, start=1):
             line = line.strip()
@@ -50,21 +58,41 @@ def read_manifest(path: Path) -> list[ManifestRow]:
                 continue
             try:
                 row = ManifestRow.model_validate(json.loads(line))
+            except ValidationError as exc:
+                detail = "; ".join(e["msg"].removeprefix("Value error, ") for e in exc.errors())
+                raise ForgeError(f"{path.name}:{lineno}: {detail}") from exc
             except Exception as exc:
                 raise ForgeError(f"{path.name}:{lineno}: unreadable manifest row: {exc}") from exc
-            major = _manifest_major(row.manifest_version)
+            major = manifest_major(row.manifest_version)
             if major not in SUPPORTED_MANIFEST_MAJORS:
                 raise ForgeError(
                     f"{path.name}:{lineno}: manifest_version {row.manifest_version} is not supported "
                     f"(this build understands {understood}) — upgrade argus-forge or re-export"
                 )
-            if major != "1" and row.exported_path is None:
+            if first_major is None:
+                first_major = major
+            elif major != first_major:
                 raise ForgeError(
-                    f"{path.name}:{lineno}: manifest_version {row.manifest_version} row has no exported_path "
-                    f"— the manifest is malformed; re-export with argus-curator"
+                    f"{path.name}:{lineno}: manifest_version {row.manifest_version} mixes major {major}.x with "
+                    f"the file's earlier {first_major}.x rows — a manifest must be one version; re-export"
                 )
             rows.append(row)
     return rows
+
+
+def _is_dataset_member(rel: PurePath) -> bool:
+    """Whether *rel* (a path relative to the export dir) is one forge would train
+    on: a supported image, not inside a dotdir, not under forge's own output.
+
+    Shared by :func:`find_images` (what's on disk) and :func:`exported_location`
+    (where a row resolves) so the two views can never disagree about whether a
+    file counts — otherwise a row could resolve to a file the trainer never sees.
+    """
+    if any(part.startswith(".") for part in rel.parts):
+        return False
+    if rel.parts and rel.parts[0] == FORGE_DIR_NAME:
+        return False
+    return rel.suffix.lower() in SUPPORTED_EXTS
 
 
 def find_images(export_dir: Path) -> list[Path]:
@@ -75,12 +103,7 @@ def find_images(export_dir: Path) -> list[Path]:
     """
     images: list[Path] = []
     for p in sorted(export_dir.rglob("*")):
-        rel = p.relative_to(export_dir)
-        if any(part.startswith(".") for part in rel.parts):
-            continue
-        if rel.parts and rel.parts[0] == FORGE_DIR_NAME:
-            continue
-        if p.suffix.lower() in SUPPORTED_EXTS and p.is_file():
+        if _is_dataset_member(p.relative_to(export_dir)) and p.is_file():
             images.append(p)
     return images
 
@@ -93,16 +116,27 @@ def caption_path(image: Path) -> Path:
 def exported_location(export_dir: Path, row: ManifestRow) -> Path | None:
     """Where *row*'s image landed inside the export dir, or None if absent.
 
-    2.x rows carry ``exported_path`` — the exact destination the curator
-    wrote (flattened exports de-collide shared basenames to
-    ``stem-<hash>.ext``, so it cannot be re-derived from ``rel_path``). A miss
-    there means the file has since gone from disk. 1.x rows predate the
-    field: exports wrote either ``<dest>/<rel_path>`` (structure preserved)
-    or ``<dest>/<basename>`` (flattened) — probe both.
+    Resolution is chosen by the *major version*, not by whether ``exported_path``
+    happens to be set: a row whose major is in
+    :data:`MAJORS_REQUIRING_EXPORTED_PATH` carries ``exported_path`` — the exact
+    destination the curator wrote (flattened exports de-collide shared basenames
+    to ``stem-<hash>.ext``, so it cannot be re-derived from ``rel_path``) — and
+    is resolved from it with no probing; a miss means the file has since gone
+    from disk. Older rows predate the field: exports wrote either
+    ``<dest>/<rel_path>`` (structure preserved) or ``<dest>/<basename>``
+    (flattened) — probe both.
+
+    The exported_path branch also requires the destination to be a dataset
+    member (:func:`_is_dataset_member`), so a row can never resolve to a file
+    that :func:`find_images` would exclude and the trainer would never see.
     """
-    if row.exported_path is not None:
+    if manifest_major(row.manifest_version) in MAJORS_REQUIRING_EXPORTED_PATH:
+        if row.exported_path is None:  # unreachable: guaranteed by ManifestRow validation
+            return None
         exported = export_dir / row.exported_path
-        return exported if exported.is_file() else None
+        if exported.is_file() and _is_dataset_member(PurePosixPath(row.exported_path)):
+            return exported
+        return None
     preserved = export_dir / row.rel_path
     if preserved.is_file():
         return preserved
@@ -127,10 +161,11 @@ def exported_collisions(rows: list[ManifestRow], resolved: list[Path | None]) ->
     A 1.x flattened export collides when selections share a basename: the
     curator silently kept the last-written pixels, so any caption pairing for
     that file is ambiguous. 2.x exports de-collide destinations curator-side,
-    so this is a defensive guard for 1.x and hand-built export dirs. Maps each colliding exported file to the ``rel_path``
-    of every row claiming it, in manifest order. Rows with an identical
-    ``rel_path`` are one selection listed twice, not a collision — they are
-    deduplicated, not flagged.
+    so this is a defensive guard for 1.x and hand-built export dirs.
+
+    Maps each colliding exported file to the ``rel_path`` of every row claiming
+    it, in manifest order. Rows with an identical ``rel_path`` are one selection
+    listed twice, not a collision — they are deduplicated, not flagged.
     """
     claims: dict[Path, dict[str, None]] = {}
     for row, dest in zip(rows, resolved, strict=True):

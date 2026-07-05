@@ -4,10 +4,11 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import PNG_1PX, ExportFactory
+from conftest import PNG_1PX, ExportFactory, decollided_export
+from pydantic import ValidationError
 
 from argus_forge.manifest import find_images, inspect_export, read_manifest, resolve_rows
-from argus_forge.models import ForgeError
+from argus_forge.models import ForgeError, ManifestRow
 
 
 def test_inspect_with_manifest(export_factory: ExportFactory) -> None:
@@ -90,20 +91,7 @@ def test_manifest_2x_row_without_exported_path_rejected(tmp_path: Path) -> None:
 def test_exported_path_resolves_decollided_flattened_export(tmp_path: Path) -> None:
     """2.x flattened exports de-collide shared basenames to stem-<hash>.ext;
     resolution must follow exported_path, not re-derive from rel_path."""
-    export = tmp_path / "flat2"
-    export.mkdir()
-    rows = []
-    for sub, exported in (("a", "IMG_0001.png"), ("b", "IMG_0001-9fc3d2.png")):
-        (export / exported).write_bytes(PNG_1PX)
-        rows.append(
-            {
-                "manifest_version": "2.0",
-                "rel_path": f"{sub}/IMG_0001.png",
-                "abs_path": f"/src/{sub}/IMG_0001.png",
-                "exported_path": exported,
-            }
-        )
-    (export / "manifest.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    export = decollided_export(tmp_path)
     info, parsed = inspect_export(export)
     assert info.missing_from_disk == 0
     resolved = resolve_rows(export, parsed)
@@ -125,6 +113,104 @@ def test_exported_path_miss_is_not_probed(tmp_path: Path) -> None:
     (export / "manifest.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
     info, _ = inspect_export(export)
     assert info.missing_from_disk == 1
+
+
+def test_manifest_2x_empty_exported_path_rejected(tmp_path: Path) -> None:
+    """An empty exported_path is malformed, not a silent miss: '' would resolve
+    to the export dir itself and the row would be undercounted as absent."""
+    export = tmp_path / "empty2x"
+    export.mkdir()
+    (export / "a.png").write_bytes(PNG_1PX)
+    row = {"manifest_version": "2.0", "rel_path": "a.png", "abs_path": "/src/a.png", "exported_path": ""}
+    (export / "manifest.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    with pytest.raises(ForgeError, match="manifest.jsonl:1.*exported_path is empty"):
+        inspect_export(export)
+
+
+@pytest.mark.parametrize("bad", ["/abs/IMG.png", "../sibling/IMG.png", "sub/../../IMG.png"])
+def test_manifest_2x_exported_path_escape_rejected(tmp_path: Path, bad: str) -> None:
+    """An absolute or ``..`` exported_path escapes the export root; it is rejected
+    at read time so a caption is never written outside the export dir."""
+    export = tmp_path / "escape2x"
+    export.mkdir()
+    (export / "IMG.png").write_bytes(PNG_1PX)
+    row = {"manifest_version": "2.0", "rel_path": "IMG.png", "abs_path": "/src/IMG.png", "exported_path": bad}
+    (export / "manifest.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    with pytest.raises(ForgeError, match="manifest.jsonl:1.*relative path inside the export root"):
+        inspect_export(export)
+
+
+def test_manifest_mixed_major_versions_rejected(tmp_path: Path) -> None:
+    """A handoff is one version; a file mixing majors is a corrupt concatenation
+    and must be refused rather than resolved row-by-row with mixed strategies."""
+    export = tmp_path / "mixed"
+    export.mkdir()
+    (export / "a.png").write_bytes(PNG_1PX)
+    (export / "b.png").write_bytes(PNG_1PX)
+    rows = [
+        {"manifest_version": "1.0", "rel_path": "a.png", "abs_path": "/src/a.png"},
+        {"manifest_version": "2.0", "rel_path": "b.png", "abs_path": "/src/b.png", "exported_path": "b.png"},
+    ]
+    (export / "manifest.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    with pytest.raises(ForgeError, match="manifest.jsonl:2.*mixes major"):
+        inspect_export(export)
+
+
+def test_exported_path_outside_dataset_view_counts_missing(tmp_path: Path) -> None:
+    """resolve_rows must agree with find_images: an exported_path landing under
+    forge/ (or a dotdir, or a non-image) would be dropped from training, so it
+    is reported missing rather than counted present."""
+    export = tmp_path / "oddloc"
+    export.mkdir()
+    (export / "forge").mkdir()
+    (export / "forge" / "x.png").write_bytes(PNG_1PX)  # excluded by find_images
+    (export / "keep.png").write_bytes(PNG_1PX)
+    rows = [
+        {"manifest_version": "2.0", "rel_path": "keep.png", "abs_path": "/s/keep.png", "exported_path": "keep.png"},
+        {"manifest_version": "2.0", "rel_path": "x.png", "abs_path": "/s/x.png", "exported_path": "forge/x.png"},
+    ]
+    (export / "manifest.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    info, _ = inspect_export(export)
+    assert info.image_count == 1  # find_images excludes forge/
+    assert info.missing_from_disk == 1  # the forge/ row does not count as present
+
+
+def test_manifest_1x_row_with_exported_path_is_probed_not_read(tmp_path: Path) -> None:
+    """Resolution is version-based: a 1.x row is probed from rel_path even if it
+    carries an exported_path value (the field is a 2.x concept)."""
+    export = tmp_path / "legacy_ep"
+    export.mkdir()
+    (export / "IMG.png").write_bytes(PNG_1PX)  # present at basename(rel_path)
+    row = {
+        "manifest_version": "1.0",
+        "rel_path": "x/IMG.png",
+        "abs_path": "/src/x/IMG.png",
+        "exported_path": "nonexistent.png",  # would resolve missing if it were read
+    }
+    (export / "manifest.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    info, _ = inspect_export(export)
+    assert info.missing_from_disk == 0  # probed rel_path basename; ignored exported_path
+
+
+def test_manifest_1x_nested_preserved_structure_resolves(export_factory: ExportFactory) -> None:
+    """1.x nested rel_paths resolve via the preserve-structure probe; guards the
+    legacy branch the now-2.0 preserve-structure fixtures no longer exercise."""
+    export = export_factory(n=4, preserve_structure=True, manifest_version="1.7")
+    info, rows = inspect_export(export)
+    assert all(row.exported_path is None for row in rows)
+    assert info.image_count == 4
+    assert info.missing_from_disk == 0
+
+
+def test_manifest_row_model_enforces_exported_path_contract() -> None:
+    """The invariant lives on ManifestRow, so direct construction / API
+    deserialization cannot produce a malformed 2.x row that later code trusts."""
+    with pytest.raises(ValidationError):  # 2.x requires exported_path
+        ManifestRow(manifest_version="2.0", rel_path="a.png", abs_path="/a.png")
+    with pytest.raises(ValidationError):  # exported_path may not escape the root
+        ManifestRow(manifest_version="2.0", rel_path="a.png", abs_path="/a.png", exported_path="../a.png")
+    # A 1.x row without the field is valid.
+    assert ManifestRow(manifest_version="1.0", rel_path="a.png", abs_path="/a.png").exported_path is None
 
 
 def test_manifest_bad_row_reports_line(tmp_path: Path) -> None:

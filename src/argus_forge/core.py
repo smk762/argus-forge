@@ -164,7 +164,7 @@ def forge_config(req: ForgeRequest) -> ForgeResult:
         note += "(skipped caption collection for it"
         if caption_path(dest).exists():
             note += f"; the existing {caption_path(dest).name} may be mispaired — verify or delete it"
-        note += "); re-export with folder structure preserved"
+        note += "); re-export so selections land at distinct paths (argus-curator 2.x de-collides shared basenames; a 1.x export can preserve folder structure)"
         warnings.append(note)
 
     captions_collected = 0
@@ -175,9 +175,11 @@ def forge_config(req: ForgeRequest) -> ForgeResult:
         if captions_collected and req.dry_run:
             warnings.append(f"dry run: {captions_collected} caption sidecars would be collected from sources")
 
-    # Re-inspect after collection so caption counts (and diffusers metadata) see them.
+    # Collection only adds sidecars next to already-counted images, so refresh
+    # the caption count in place rather than re-parsing the manifest and
+    # re-walking the whole export dir.
     if captions_collected and not req.dry_run:
-        info, rows = inspect_export(export_dir, category=req.category)
+        info = info.model_copy(update={"caption_count": info.caption_count + captions_collected})
 
     if info.caption_count == 0:
         warnings.append("no .txt captions found — images will train on the trigger phrase alone")

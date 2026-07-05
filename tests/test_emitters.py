@@ -6,7 +6,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
-from conftest import PNG_1PX, ExportFactory
+from conftest import PNG_1PX, ExportFactory, decollided_export
 
 from argus_forge.core import forge_config, parse_path_map, slugify
 from argus_forge.models import ForgeError, ForgeRequest, ParamOverrides
@@ -271,24 +271,7 @@ def test_parse_path_map() -> None:
 def test_manifest_2x_decollided_export_pairs_both_captions(tmp_path: Path) -> None:
     """Under manifest 2.0 the curator de-collides shared basenames, so what was
     a collision in 1.x becomes two distinct rows with unambiguous captions."""
-    export = tmp_path / "flat2"
-    export.mkdir()
-    rows = []
-    for sub, exported, caption in (("a", "IMG_0001.png", "caption a"), ("b", "IMG_0001-9fc3d2.png", "caption b")):
-        src = tmp_path / "sources" / sub / "IMG_0001.png"
-        src.parent.mkdir(parents=True)
-        src.write_bytes(PNG_1PX)
-        src.with_suffix(".txt").write_text(caption, encoding="utf-8")
-        (export / exported).write_bytes(PNG_1PX)
-        rows.append(
-            {
-                "manifest_version": "2.0",
-                "rel_path": f"{sub}/IMG_0001.png",
-                "abs_path": str(src),
-                "exported_path": exported,
-            }
-        )
-    (export / "manifest.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    export = decollided_export(tmp_path, with_source_captions=True)
     result = forge_config(ForgeRequest(export_dir=str(export), trainer="kohya"))
     assert not any("collision" in w for w in result.warnings)
     assert result.captions_collected == 2

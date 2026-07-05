@@ -34,6 +34,10 @@ MANIFEST_VERSION = "1.0"
 # Caption sidecar extension (argus-lens writes these next to the images).
 CAPTION_EXT = ".txt"
 
+# Env var holding a default path_map as "container=host[,container=host...]"
+# (the compose file sets it from OUTPUT_DIR). Request-level maps win over it.
+PATH_MAP_ENV = "FORGE_PATH_MAP"
+
 
 class ForgeError(RuntimeError):
     """A user-facing failure: bad input dir, unreadable manifest, bad request."""

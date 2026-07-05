@@ -54,14 +54,15 @@ def _render(export_factory: ExportFactory, count: int, category: str) -> dict[st
 @pytest.mark.parametrize(("count", "category"), CASES)
 def test_kohya_emitter_matches_golden(export_factory: ExportFactory, count: int, category: str) -> None:
     rendered = _render(export_factory, count, category)
+    update = os.environ.get("UPDATE_GOLDEN", "").lower() in ("1", "true", "yes")
     for name, content in rendered.items():
         golden_path = GOLDEN_DIR / f"{category}_{count}_{name}"
-        if os.environ.get("UPDATE_GOLDEN"):
+        if update:
             golden_path.parent.mkdir(parents=True, exist_ok=True)
             golden_path.write_text(content, encoding="utf-8")
         assert golden_path.is_file(), f"missing golden {golden_path.name} — run with UPDATE_GOLDEN=1"
         golden = golden_path.read_text(encoding="utf-8")
-        assert tomllib.loads(content).keys() == tomllib.loads(golden).keys()
+        tomllib.loads(content)  # whatever else drifts, the emitter must render valid TOML
         assert content == golden, (
             f"{golden_path.name} drifted from the emitter. If the emitter change is intentional, "
             "regenerate with UPDATE_GOLDEN=1 and sync argus-studio's forgeDemo.ts to match."

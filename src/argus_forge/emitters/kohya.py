@@ -21,8 +21,8 @@ def emit(ctx: EmitContext) -> list[GeneratedFile]:
 
     # kohya's subset image glob is non-recursive, so a nested export (curator's
     # preserve_structure) needs one subset per image-bearing directory — a
-    # single root subset would train zero images.
-    subset_dirs = sorted({img.parent for img in ctx.images}) or [ctx.export_dir]
+    # single root subset would train zero images. core guarantees >= 1 image.
+    subset_dirs = sorted({img.parent for img in ctx.images})
 
     lines: list[tuple[str, object] | str] = [
         "# argus-forge dataset config for kohya sd-scripts (pass via --dataset_config)",

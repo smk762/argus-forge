@@ -14,16 +14,24 @@ from pathlib import Path
 import structlog
 
 from argus_forge.emitters import EMITTERS, EmitContext
+from argus_forge.emitters.base import map_path
 from argus_forge.heuristics import apply_overrides
 from argus_forge.manifest import (
     FORGE_DIR_NAME,
     caption_path,
     exported_collisions,
-    exported_location,
     find_images,
     inspect_export,
+    resolve_rows,
 )
-from argus_forge.models import SUPPORTED_EXTS, ForgeError, ForgeRequest, ForgeResult, ManifestRow
+from argus_forge.models import (
+    PATH_MAP_ENV,
+    SUPPORTED_EXTS,
+    ForgeError,
+    ForgeRequest,
+    ForgeResult,
+    ManifestRow,
+)
 
 logger = structlog.get_logger()
 
@@ -39,29 +47,61 @@ def slugify(name: str) -> str:
     return slug or "dataset"
 
 
-PATH_MAP_ENV = "FORGE_PATH_MAP"
+def normalize_path_pair(src: str, dst: str, source: str = "path_map") -> tuple[str, str]:
+    """Validate and normalize one ``container -> host`` prefix mapping.
+
+    Prefixes are compared without trailing slashes so ``/data/out`` and
+    ``/data/out/`` are the same key everywhere (merge, override, longest-match).
+    """
+    src, dst = src.strip(), dst.strip()
+    if not src or not dst:
+        raise ForgeError(f"{source}: bad entry {src!r} -> {dst!r} — expected 'container/prefix=host/prefix'")
+    src = src.rstrip("/")
+    if not src:
+        raise ForgeError(f"{source}: cannot remap the filesystem root ('/')")
+    return src, dst.rstrip("/") or "/"
 
 
-def parse_path_map(spec: str) -> dict[str, str]:
-    """Parse ``container=host[,container=host...]`` into a prefix map."""
-    mapping: dict[str, str] = {}
-    for pair in spec.split(","):
-        pair = pair.strip()
-        if not pair:
-            continue
-        src, sep, dst = pair.partition("=")
-        if not sep or not src.strip() or not dst.strip():
-            raise ForgeError(f"bad path_map entry {pair!r} — expected 'container/prefix=host/prefix'")
-        mapping[src.strip()] = dst.strip()
-    return mapping
+def path_map_entry(pair: str, source: str = "path_map") -> tuple[str, str]:
+    """Parse a single ``container=host`` string (one --path-map flag value).
+
+    Not comma-split, so paths containing a comma work — pass one flag per entry.
+    """
+    src, sep, dst = pair.partition("=")
+    if not sep:
+        raise ForgeError(f"{source}: bad entry {pair.strip()!r} — expected 'container/prefix=host/prefix'")
+    return normalize_path_pair(src, dst, source)
+
+
+def parse_path_map(spec: str, source: str = "path_map") -> dict[str, str]:
+    """Parse the comma-separated ``container=host[,...]`` env-var form."""
+    return dict(path_map_entry(pair, source) for pair in spec.split(",") if pair.strip())
+
+
+def env_path_map() -> dict[str, str]:
+    """The FORGE_PATH_MAP default map; raises ForgeError if it is malformed."""
+    return parse_path_map(os.environ.get(PATH_MAP_ENV, ""), source=f"{PATH_MAP_ENV} env var")
 
 
 def resolve_path_map(req_map: dict[str, str]) -> dict[str, str]:
-    """The request's path_map merged over the FORGE_PATH_MAP env default."""
-    return {**parse_path_map(os.environ.get(PATH_MAP_ENV, "")), **req_map}
+    """The request's path_map merged over the FORGE_PATH_MAP env default.
+
+    Request entries are validated and normalized like env entries, so a
+    trailing-slash spelling can neither dodge validation nor dodge being
+    overridden.
+    """
+    merged = env_path_map()
+    merged.update(normalize_path_pair(src, dst) for src, dst in req_map.items())
+    return merged
 
 
-def collect_captions(export_dir: Path, rows: list[ManifestRow], dry_run: bool, skip: set[Path] | None = None) -> int:
+def collect_captions(
+    export_dir: Path,
+    rows: list[ManifestRow],
+    dry_run: bool,
+    resolved: list[Path | None] | None = None,
+    skip: set[Path] | None = None,
+) -> int:
     """Copy ``.txt`` sidecars written next to the *source* images into the export.
 
     argus-lens captions the manifest's ``abs_path`` entries, so sidecars land
@@ -69,15 +109,17 @@ def collect_captions(export_dir: Path, rows: list[ManifestRow], dry_run: bool, s
     closes that gap. Existing sidecars in the export are never overwritten,
     and files in *skip* (basename collisions — see :func:`exported_collisions`)
     are left uncaptioned rather than paired with a caption that may describe
-    different pixels.
+    different pixels. *resolved* is :func:`resolve_rows` output, passable to
+    avoid re-stat()ing every row.
     """
+    if resolved is None:
+        resolved = resolve_rows(export_dir, rows)
     copied = 0
-    for row in rows:
+    for row, dest_img in zip(rows, resolved, strict=True):
+        if dest_img is None or (skip and dest_img in skip):
+            continue
         src_caption = caption_path(Path(row.abs_path))
         if not src_caption.is_file():
-            continue
-        dest_img = exported_location(export_dir, row)
-        if dest_img is None or (skip and dest_img in skip):
             continue
         dest_caption = caption_path(dest_img)
         if dest_caption.exists():
@@ -90,7 +132,9 @@ def collect_captions(export_dir: Path, rows: list[ManifestRow], dry_run: bool, s
 
 def forge_config(req: ForgeRequest) -> ForgeResult:
     """Render (and unless ``dry_run``, write) trainer configs for an export dir."""
-    export_dir = Path(req.export_dir).expanduser()
+    # Absolute (but not symlink-resolved: symlink-mode exports keep their spelling)
+    # so emitted paths are really absolute and path_map prefixes can match.
+    export_dir = Path(os.path.abspath(Path(req.export_dir).expanduser()))
     if req.trainer not in EMITTERS:
         raise ForgeError(f"unknown trainer: {req.trainer} (expected one of {', '.join(EMITTERS)})")
 
@@ -108,17 +152,26 @@ def forge_config(req: ForgeRequest) -> ForgeResult:
             f"manifest lists {info.manifest_rows} images but {info.image_count} were found — forging for what's on disk"
         )
 
-    collisions = exported_collisions(export_dir, rows)
+    resolved = resolve_rows(export_dir, rows)
+    collisions = exported_collisions(rows, resolved)
     for dest, rels in sorted(collisions.items()):
-        warnings.append(
-            f"basename collision: {', '.join(rels)} all resolve to {dest.relative_to(export_dir)} — "
-            "only one image survived the flattened export and its caption pairing is ambiguous "
-            "(skipped caption collection for it); re-export with folder structure preserved"
-        )
+        try:
+            shown = str(dest.relative_to(export_dir))
+        except ValueError:  # a row's rel_path escaped the export dir
+            shown = str(dest)
+        note = f"basename collision: {', '.join(rels)} all resolve to {shown} — "
+        note += "the pixels on disk could belong to any of them, so caption pairing is ambiguous "
+        note += "(skipped caption collection for it"
+        if caption_path(dest).exists():
+            note += f"; the existing {caption_path(dest).name} may be mispaired — verify or delete it"
+        note += "); re-export with folder structure preserved"
+        warnings.append(note)
 
     captions_collected = 0
     if req.collect_captions and rows:
-        captions_collected = collect_captions(export_dir, rows, dry_run=req.dry_run, skip=set(collisions))
+        captions_collected = collect_captions(
+            export_dir, rows, dry_run=req.dry_run, resolved=resolved, skip=set(collisions)
+        )
         if captions_collected and req.dry_run:
             warnings.append(f"dry run: {captions_collected} caption sidecars would be collected from sources")
 
@@ -140,6 +193,12 @@ def forge_config(req: ForgeRequest) -> ForgeResult:
     if backend != "sdxl":
         warnings.append(f"heuristics are tuned for SDXL; manifest targets {backend!r} — review lr/resolution")
 
+    # A checkpoint from the manifest is a container path like everything else;
+    # HF repo ids ("stabilityai/...") are not absolute and are left alone.
+    base_model_mapped = base_model.startswith("/") and map_path(base_model, path_map) != base_model
+    if base_model_mapped:
+        base_model = map_path(base_model, path_map)
+
     trigger = req.trigger or slugify(export_dir.name)
     output_name = req.output_name or f"{slugify(export_dir.name)}-lora"
     params = apply_overrides(info.suggested, req.overrides)
@@ -156,6 +215,8 @@ def forge_config(req: ForgeRequest) -> ForgeResult:
         warnings=warnings,
         path_map=path_map,
     )
+    if base_model_mapped:
+        ctx.map_hits += 1  # count it so path_note() reports the remap honestly
     files = EMITTERS[req.trainer](ctx)
 
     if not req.dry_run:

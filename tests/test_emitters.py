@@ -265,6 +265,151 @@ def test_parse_path_map() -> None:
         parse_path_map("=/b")
 
 
+# --- regressions from the max-effort review of PR #6 ---
+
+
+def test_duplicate_manifest_rows_are_not_a_collision(tmp_path: Path) -> None:
+    """The same rel_path listed twice is a duplicate selection, not ambiguity."""
+    export = tmp_path / "dup"
+    export.mkdir()
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.png").write_bytes(PNG_1PX)
+    (src / "a.txt").write_text("caption a", encoding="utf-8")
+    (export / "a.png").write_bytes(PNG_1PX)
+    row = {"manifest_version": "1.0", "rel_path": "a.png", "abs_path": str(src / "a.png")}
+    (export / "manifest.jsonl").write_text(json.dumps(row) + "\n" + json.dumps(row) + "\n", encoding="utf-8")
+    result = forge_config(ForgeRequest(export_dir=str(export), trainer="kohya"))
+    assert not any("collision" in w for w in result.warnings)
+    assert result.captions_collected == 1
+    assert (export / "a.txt").read_text() == "caption a"
+
+
+def test_collision_outside_export_dir_warns_instead_of_crashing(tmp_path: Path) -> None:
+    """Absolute rel_paths escape the export dir; the warning must not ValueError."""
+    export = tmp_path / "esc"
+    export.mkdir()
+    (export / "a.png").write_bytes(PNG_1PX)
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(PNG_1PX)
+    # Two distinct rel_path spellings (Path collapses the doubled slash) that
+    # both resolve to the same file *outside* the export dir.
+    rows = [
+        {"manifest_version": "1.0", "rel_path": str(outside), "abs_path": str(outside)},
+        {"manifest_version": "1.0", "rel_path": f"{tmp_path}//outside.png", "abs_path": str(outside)},
+    ]
+    (export / "manifest.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    result = forge_config(ForgeRequest(export_dir=str(export), trainer="kohya", dry_run=True))
+    assert any("collision" in w and str(outside) in w for w in result.warnings)
+
+
+def test_collision_warning_flags_preexisting_sidecar(tmp_path: Path) -> None:
+    """A sidecar already sitting on a collided file may be mispaired — say so."""
+    export = _collision_export(tmp_path)
+    (export / "IMG_0001.txt").write_text("stale caption from a pre-fix run", encoding="utf-8")
+    result = forge_config(ForgeRequest(export_dir=str(export), trainer="kohya", dry_run=True))
+    assert any("IMG_0001.txt may be mispaired" in w for w in result.warnings)
+
+
+def test_trailing_slash_request_key_still_overrides_env(export_factory: ExportFactory, monkeypatch) -> None:
+    """Keys are normalized, so spelling differences can't invert precedence."""
+    export = export_factory(n=3)
+    monkeypatch.setenv("FORGE_PATH_MAP", f"{export}/=/env/out")  # trailing slash
+    result = forge_config(
+        ForgeRequest(export_dir=str(export), trainer="kohya", dry_run=True, path_map={str(export): "/req/out"})
+    )
+    dataset = tomllib.loads(next(f.content for f in result.files if f.name.endswith("dataset.toml")))
+    assert dataset["datasets"][0]["subsets"][0]["image_dir"] == "/req/out"
+
+
+def test_request_path_map_is_validated(export_factory: ExportFactory) -> None:
+    """The wire path (studio UI) gets the same validation as CLI/env input."""
+    export = export_factory(n=3)
+    for bad in ({str(export): ""}, {str(export): "   "}, {"": "/host"}, {"/": "/host"}):
+        with pytest.raises(ForgeError, match="path_map"):
+            forge_config(ForgeRequest(export_dir=str(export), trainer="kohya", dry_run=True, path_map=bad))
+
+
+def test_relative_export_dir_is_made_absolute(export_factory: ExportFactory, monkeypatch) -> None:
+    export = export_factory(n=3)
+    monkeypatch.chdir(export.parent)
+    result = forge_config(
+        ForgeRequest(export_dir=export.name, trainer="kohya", dry_run=True, path_map={str(export): "/host/out"})
+    )
+    dataset = tomllib.loads(next(f.content for f in result.files if f.name.endswith("dataset.toml")))
+    assert dataset["datasets"][0]["subsets"][0]["image_dir"] == "/host/out"
+
+
+def test_base_model_checkpoint_path_is_remapped(export_factory: ExportFactory) -> None:
+    export = export_factory(n=3, checkpoint="/data/models/juggernaut-xl.safetensors")
+    result = forge_config(
+        ForgeRequest(export_dir=str(export), trainer="kohya", dry_run=True, path_map={"/data/models": "/host/models"})
+    )
+    assert result.base_model == "/host/models/juggernaut-xl.safetensors"
+    config = tomllib.loads(next(f.content for f in result.files if f.name.endswith("config.toml")))
+    assert config["pretrained_model_name_or_path"] == "/host/models/juggernaut-xl.safetensors"
+
+
+def test_hf_repo_id_base_model_is_never_remapped(export_factory: ExportFactory) -> None:
+    export = export_factory(n=3)
+    result = forge_config(
+        ForgeRequest(export_dir=str(export), trainer="kohya", dry_run=True, path_map={str(export): "/host/out"})
+    )
+    assert result.base_model == "stabilityai/stable-diffusion-xl-base-1.0"
+
+
+def test_unmatched_path_map_warns_instead_of_claiming_remap(export_factory: ExportFactory) -> None:
+    export = export_factory(n=3)
+    result = forge_config(
+        ForgeRequest(export_dir=str(export), trainer="kohya", dry_run=True, path_map={"/data/typo": "/host/out"})
+    )
+    readme = next(f.content for f in result.files if f.name.endswith("README.md"))
+    assert "remapped for the host" not in readme
+    assert "no rendered path matched" in readme
+    assert any("no rendered path matched" in w for w in result.warnings)
+
+
+def test_mapping_to_filesystem_root_keeps_valid_paths(export_factory: ExportFactory) -> None:
+    export = export_factory(n=3)
+    result = forge_config(
+        ForgeRequest(export_dir=str(export), trainer="kohya", dry_run=True, path_map={str(export): "/"})
+    )
+    dataset = tomllib.loads(next(f.content for f in result.files if f.name.endswith("dataset.toml")))
+    assert dataset["datasets"][0]["subsets"][0]["image_dir"] == "/"
+    config = tomllib.loads(next(f.content for f in result.files if f.name.endswith("config.toml")))
+    assert config["output_dir"] == "/forge/kohya/output"
+
+
+def test_non_bmp_characters_render_valid_toml(export_factory: ExportFactory) -> None:
+    export = export_factory(n=3)
+    result = forge_config(
+        ForgeRequest(
+            export_dir=str(export), trainer="kohya", dry_run=True, path_map={str(export): "/Users/me/\U0001f4c1sets"}
+        )
+    )
+    dataset = tomllib.loads(next(f.content for f in result.files if f.name.endswith("dataset.toml")))
+    assert dataset["datasets"][0]["subsets"][0]["image_dir"] == "/Users/me/\U0001f4c1sets"
+
+
+@pytest.mark.parametrize("trainer", ["kohya", "onetrainer", "diffusers"])
+def test_no_unmapped_container_path_escapes_any_emitter(export_factory: ExportFactory, trainer: str) -> None:
+    """Every emitted file except the README (which cites the mapping itself)
+    must be free of the container prefix once a path_map covers it."""
+    export = export_factory(n=4, preserve_structure=True, checkpoint="/data/models/ck.safetensors")
+    result = forge_config(
+        ForgeRequest(
+            export_dir=str(export),
+            trainer=trainer,  # type: ignore[arg-type]
+            dry_run=True,
+            path_map={str(export): "/host/out", "/data/models": "/host/models"},
+        )
+    )
+    for f in result.files:
+        if f.name.endswith("README.md"):
+            continue
+        assert str(export) not in f.content, f"unmapped container path leaked into {f.name}"
+
+
 def test_path_map_longest_prefix_wins_and_no_partial_component_match(export_factory: ExportFactory) -> None:
     export = export_factory(n=5)
     result = forge_config(

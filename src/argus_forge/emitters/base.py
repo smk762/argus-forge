@@ -7,7 +7,23 @@ import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from argus_forge.models import GeneratedFile, TargetCategory, TargetProfile, TrainingParams
+from argus_forge.models import PATH_MAP_ENV, GeneratedFile, TargetCategory, TargetProfile, TrainingParams
+
+
+def map_path(path: Path | str, path_map: dict[str, str]) -> str:
+    """*path* with the longest matching ``path_map`` prefix rewritten.
+
+    Keys are expected pre-normalized (no trailing slash — see
+    :func:`argus_forge.core.resolve_path_map`); a prefix only matches at a
+    path-component boundary, so ``/data/out`` never rewrites ``/data/output``.
+    """
+    s = str(path)
+    for src in sorted(path_map, key=len, reverse=True):
+        if s == src or s.startswith(src + "/"):
+            dst = path_map[src]
+            mapped = (dst if dst != "/" else "") + s[len(src) :]
+            return mapped or "/"
+    return s
 
 
 @dataclass
@@ -28,8 +44,12 @@ class EmitContext:
     images: list[Path]
     warnings: list[str] = field(default_factory=list)
     # Prefix rewrites applied to every absolute path rendered into configs
-    # (container path -> host path), longest prefix wins. See ForgeRequest.path_map.
+    # (container path -> host path), longest prefix wins. Keys/values arrive
+    # normalized from core.resolve_path_map. See ForgeRequest.path_map.
     path_map: dict[str, str] = field(default_factory=dict)
+    # How many mapped() calls actually rewrote a path — path_note() uses this
+    # to avoid claiming a remap happened when no prefix ever matched.
+    map_hits: int = field(default=0, init=False)
 
     @property
     def category(self) -> TargetCategory:
@@ -49,22 +69,31 @@ class EmitContext:
         Configs are often forged inside a container but run on the host; this
         is where ``/data/out/...`` becomes ``/home/you/argus/out/...``.
         """
-        s = str(path)
-        for src in sorted(self.path_map, key=len, reverse=True):
-            prefix = src.rstrip("/")
-            if prefix and (s == prefix or s.startswith(prefix + "/")):
-                return self.path_map[src].rstrip("/") + s[len(prefix) :]
-        return s
+        out = map_path(path, self.path_map)
+        if out != str(path):
+            self.map_hits += 1
+        return out
 
     def path_note(self) -> str:
-        """README blurb explaining whether config paths were remapped."""
-        if self.path_map:
+        """README blurb stating whether config paths were actually remapped.
+
+        Emitters must call this after rendering everything that goes through
+        :meth:`mapped`, so ``map_hits`` reflects the whole artifact set.
+        """
+        if self.path_map and self.map_hits:
             pairs = ", ".join(f"`{src}` -> `{dst}`" for src, dst in sorted(self.path_map.items()))
             return f"- Absolute paths in these files were remapped for the host: {pairs}."
+        if self.path_map:
+            note = (
+                "a path map was configured but no rendered path matched its prefixes — "
+                "these files keep their original paths; check the map against the export dir"
+            )
+            self.warnings.append(f"path_map: {note}")
+            return f"- WARNING: {note}."
         return (
             "- Absolute paths in these files are as seen by the process that ran forge. "
             "If that was a container (e.g. the compose stack), they will not exist on the "
-            "host — re-forge with `path_map` (or set `FORGE_PATH_MAP=container=host`) to "
+            f"host — re-forge with `path_map` (or set `{PATH_MAP_ENV}=container=host`) to "
             "rewrite them."
         )
 
@@ -89,10 +118,13 @@ def toml_value(value: object) -> str:
 
     TOML shares JSON's syntax for basic strings, booleans, ints, floats and
     flat arrays, so ``json.dumps`` produces valid TOML for everything forge
-    writes — no extra dependency needed.
+    writes — no extra dependency needed. ``ensure_ascii=False`` matters:
+    JSON's ``\\ud83d\\udcc1`` surrogate-pair escapes for non-BMP characters
+    (emoji in a mapped host path, say) are invalid TOML, while the raw UTF-8
+    characters are fine in both.
     """
     if isinstance(value, bool | int | float | str):
-        return json.dumps(value)
+        return json.dumps(value, ensure_ascii=False)
     if isinstance(value, list | tuple):
         return "[" + ", ".join(toml_value(v) for v in value) + "]"
     raise TypeError(f"cannot render {type(value).__name__} as TOML")

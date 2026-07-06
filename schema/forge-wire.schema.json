@@ -302,6 +302,18 @@
           "title": "Abs Path",
           "type": "string"
         },
+        "exported_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exported Path"
+        },
         "manifest_version": {
           "title": "Manifest Version",
           "type": "string"

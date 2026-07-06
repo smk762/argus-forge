@@ -13,9 +13,10 @@ shared ``argus-core`` package).
 
 from __future__ import annotations
 
+from pathlib import PurePosixPath
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 TargetStyle = Literal["photo", "anime"]
 TargetCategory = Literal["identity", "wardrobe", "pose_composition", "setting"]
@@ -26,10 +27,26 @@ TRAINERS: tuple[TrainerId, ...] = ("kohya", "onetrainer", "diffusers")
 
 SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
-# Major version of the curator handoff manifest this build understands.
+# Major versions of the curator handoff manifest this build understands.
 # argus-curator stamps every row with its MANIFEST_VERSION; forge refuses a
-# manifest whose major differs instead of misreading it.
-MANIFEST_VERSION = "1.0"
+# manifest whose major is not listed here instead of misreading it.
+# 2.x: rows carry ``exported_path`` (the real destination under the export
+#      root, de-collided by the curator) and exist only for files whose
+#      transfer succeeded. 1.x: legacy — destinations are re-derived from
+#      ``rel_path`` by probing.
+SUPPORTED_MANIFEST_MAJORS: tuple[str, ...] = ("1", "2")
+
+# Majors whose rows must carry ``exported_path``. Kept as an explicit set beside
+# SUPPORTED_MANIFEST_MAJORS — rather than derived as "any major that isn't 1" —
+# so adding a future major is a deliberate decision about whether it uses
+# exported_path, not a silent consequence of a comparison.
+MAJORS_REQUIRING_EXPORTED_PATH: frozenset[str] = frozenset({"2"})
+
+
+def manifest_major(version: str) -> str:
+    """The major component of a ``manifest_version`` string (``'2.7' -> '2'``)."""
+    return version.split(".", 1)[0]
+
 
 # Caption sidecar extension (argus-lens writes these next to the images).
 CAPTION_EXT = ".txt"
@@ -63,11 +80,42 @@ class ManifestRow(BaseModel):
     manifest_version: str
     rel_path: str
     abs_path: str
+    # Where the file actually landed under the export root (posix, relative).
+    # Required on 2.x rows — flattened exports de-collide basenames to
+    # ``stem-<hash>.ext``, so it cannot be re-derived from rel_path. Absent
+    # on 1.x rows, which predate the field.
+    exported_path: str | None = None
     target_profile: TargetProfile = Field(default_factory=TargetProfile)
     primary_face_cluster: str | None = None
     primary_face_pose: str | None = None
     score: float = 0.0
     similar_group: int = 0
+
+    @model_validator(mode="after")
+    def _check_exported_path(self) -> ManifestRow:
+        """Enforce the ``exported_path`` contract on every row, however built.
+
+        This lives on the model (not only in :func:`read_manifest`) so the
+        invariant holds for direct construction and any future deserialization
+        path, and so :func:`argus_forge.manifest.exported_location` can trust
+        it. A version whose major is in :data:`MAJORS_REQUIRING_EXPORTED_PATH`
+        must carry ``exported_path``; when present it must be a non-empty
+        relative path that stays inside the export root (no absolute path, no
+        ``..``) — it is joined onto the export dir and caption sidecars are
+        written beside the result.
+        """
+        if self.exported_path is not None:
+            if not self.exported_path.strip():
+                raise ValueError("exported_path is empty")
+            rel = PurePosixPath(self.exported_path)
+            if rel.is_absolute() or ".." in rel.parts:
+                raise ValueError(f"exported_path {self.exported_path!r} must be a relative path inside the export root")
+        elif manifest_major(self.manifest_version) in MAJORS_REQUIRING_EXPORTED_PATH:
+            raise ValueError(
+                f"manifest_version {self.manifest_version} row has no exported_path "
+                "— the manifest is malformed; re-export with argus-curator"
+            )
+        return self
 
 
 class TrainingParams(BaseModel):

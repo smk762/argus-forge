@@ -20,9 +20,8 @@ from argus_forge.manifest import (
     FORGE_DIR_NAME,
     caption_path,
     exported_collisions,
-    find_images,
-    inspect_export,
     resolve_rows,
+    scan_export,
 )
 from argus_forge.models import (
     PATH_MAP_ENV,
@@ -140,7 +139,9 @@ def forge_config(req: ForgeRequest) -> ForgeResult:
 
     path_map = resolve_path_map(req.path_map)
 
-    info, rows = inspect_export(export_dir, category=req.category)
+    # One scan up front; reuse its resolved list and image list below instead of
+    # re-walking the tree and re-stat()ing every row.
+    info, rows, resolved, images = scan_export(export_dir, category=req.category)
     if info.image_count == 0:
         raise ForgeError(f"no images found under {export_dir} (supported: {', '.join(sorted(SUPPORTED_EXTS))})")
 
@@ -152,7 +153,6 @@ def forge_config(req: ForgeRequest) -> ForgeResult:
             f"manifest lists {info.manifest_rows} images but {info.image_count} were found — forging for what's on disk"
         )
 
-    resolved = resolve_rows(export_dir, rows)
     collisions = exported_collisions(rows, resolved)
     for dest, rels in sorted(collisions.items()):
         try:
@@ -164,7 +164,7 @@ def forge_config(req: ForgeRequest) -> ForgeResult:
         note += "(skipped caption collection for it"
         if caption_path(dest).exists():
             note += f"; the existing {caption_path(dest).name} may be mispaired — verify or delete it"
-        note += "); re-export with folder structure preserved"
+        note += "); re-export so selections land at distinct paths (argus-curator 2.x de-collides shared basenames; a 1.x export can preserve folder structure)"
         warnings.append(note)
 
     captions_collected = 0
@@ -175,9 +175,11 @@ def forge_config(req: ForgeRequest) -> ForgeResult:
         if captions_collected and req.dry_run:
             warnings.append(f"dry run: {captions_collected} caption sidecars would be collected from sources")
 
-    # Re-inspect after collection so caption counts (and diffusers metadata) see them.
+    # Collection only adds sidecars next to already-counted images, so refresh
+    # the caption count in place rather than re-parsing the manifest and
+    # re-walking the whole export dir.
     if captions_collected and not req.dry_run:
-        info, rows = inspect_export(export_dir, category=req.category)
+        info = info.model_copy(update={"caption_count": info.caption_count + captions_collected})
 
     if info.caption_count == 0:
         warnings.append("no .txt captions found — images will train on the trigger phrase alone")
@@ -211,7 +213,7 @@ def forge_config(req: ForgeRequest) -> ForgeResult:
         base_model=base_model,
         trigger=trigger,
         output_name=output_name,
-        images=find_images(export_dir),
+        images=images,
         warnings=warnings,
         path_map=path_map,
     )

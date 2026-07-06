@@ -6,7 +6,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
-from conftest import PNG_1PX, ExportFactory
+from conftest import PNG_1PX, ExportFactory, decollided_export
 
 from argus_forge.core import forge_config, parse_path_map, slugify
 from argus_forge.models import ForgeError, ForgeRequest, ParamOverrides
@@ -266,6 +266,17 @@ def test_parse_path_map() -> None:
 
 
 # --- regressions from the max-effort review of PR #6 ---
+
+
+def test_manifest_2x_decollided_export_pairs_both_captions(tmp_path: Path) -> None:
+    """Under manifest 2.0 the curator de-collides shared basenames, so what was
+    a collision in 1.x becomes two distinct rows with unambiguous captions."""
+    export = decollided_export(tmp_path, with_source_captions=True)
+    result = forge_config(ForgeRequest(export_dir=str(export), trainer="kohya"))
+    assert not any("collision" in w for w in result.warnings)
+    assert result.captions_collected == 2
+    assert (export / "IMG_0001.txt").read_text() == "caption a"
+    assert (export / "IMG_0001-9fc3d2.txt").read_text() == "caption b"
 
 
 def test_duplicate_manifest_rows_are_not_a_collision(tmp_path: Path) -> None:

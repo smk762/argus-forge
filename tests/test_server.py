@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -10,9 +12,27 @@ from fastapi.testclient import TestClient
 from argus_forge.server import create_app
 
 
+def _wait_terminal(client: TestClient, run_id: str, timeout: float = 15.0) -> dict:
+    """Poll GET /run/{id} until the run leaves 'running' (it executes on a
+    background job, so it finishes without us consuming the stream)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        resp = client.get(f"/run/{run_id}")
+        assert resp.status_code == 200
+        body = resp.json()
+        if body["status"] != "running":
+            return body
+        time.sleep(0.05)
+    raise AssertionError(f"run {run_id} still running after {timeout}s")
+
+
 @pytest.fixture
-def client() -> TestClient:
-    return TestClient(create_app(cors=True))
+def client() -> Iterator[TestClient]:
+    # Context-manager form: one persistent event loop across requests (so a
+    # background run job and a later cancel/status request share it) + lifespan
+    # startup/shutdown (the shutdown hook cancels any run still in flight).
+    with TestClient(create_app(cors=True)) as c:
+        yield c
 
 
 def test_health(client: TestClient) -> None:
@@ -79,17 +99,13 @@ def test_config_invalid_trainer_is_422(client: TestClient, export_factory: Expor
     assert resp.status_code == 422  # pydantic literal validation
 
 
-def test_run_streams_ndjson(client: TestClient, tmp_path: Path) -> None:
+def test_run_starts_and_returns_run_id(client: TestClient, tmp_path: Path) -> None:
     export = forge_stub(tmp_path, "kohya", "echo hi\n")
     resp = client.post("/run", json={"export_dir": str(export), "trainer": "kohya"})
-    assert resp.status_code == 200
-    assert resp.headers["content-type"].startswith("application/x-ndjson")
-    run_id = resp.headers["x-training-run-id"]
-    events = [json.loads(line) for line in resp.text.splitlines() if line]
-    assert events[0]["type"] == "start"
-    assert any(e["type"] == "log" and e["message"] == "hi" for e in events)
-    assert events[-1]["type"] == "exit" and events[-1]["returncode"] == 0
-    assert all(e["run_id"] == run_id for e in events)
+    assert resp.status_code == 202  # accepted; runs in the background
+    body = resp.json()
+    assert body["run_id"] and body["trainer"] == "kohya"
+    assert body["status"] in {"running", "succeeded"}
 
 
 def test_run_missing_config_is_400(client: TestClient, tmp_path: Path) -> None:
@@ -113,3 +129,57 @@ def test_run_blocked_env_is_400(client: TestClient, tmp_path: Path) -> None:
     resp = client.post("/run", json={"export_dir": str(export), "trainer": "kohya", "env": {"LD_PRELOAD": "/x.so"}})
     assert resp.status_code == 400
     assert "LD_PRELOAD" in resp.json()["detail"]
+
+
+# --- job registry (#13): runs outlive the connection ---
+
+
+def test_run_executes_without_a_consumer(client: TestClient, tmp_path: Path) -> None:
+    """The run executes on a background job even though nobody ever attaches to
+    its stream — proving it doesn't depend on (and so survives) a connection."""
+    export = forge_stub(tmp_path, "kohya", "echo a\nsleep 0.3\necho b\n")
+    run_id = client.post("/run", json={"export_dir": str(export), "trainer": "kohya"}).json()["run_id"]
+    final = _wait_terminal(client, run_id)
+    assert final["status"] == "succeeded" and final["returncode"] == 0
+    assert final["started_at"] and final["ended_at"]
+
+
+def test_run_stream_reconnect_replays_backlog_and_terminal(client: TestClient, tmp_path: Path) -> None:
+    export = forge_stub(tmp_path, "kohya", "echo one\necho two\n")
+    run_id = client.post("/run", json={"export_dir": str(export), "trainer": "kohya"}).json()["run_id"]
+    _wait_terminal(client, run_id)
+    # Attach after the run finished: the buffered backlog (incl. the terminal
+    # event) replays, tagged with the run id.
+    replay = client.get(f"/run/{run_id}/stream")
+    assert replay.status_code == 200
+    assert replay.headers["content-type"].startswith("application/x-ndjson")
+    assert replay.headers["x-training-run-id"] == run_id
+    events = [json.loads(line) for line in replay.text.splitlines() if line]
+    assert any(e["type"] == "log" and e["message"] == "two" for e in events)
+    assert events[-1]["type"] == "exit" and events[-1]["returncode"] == 0
+    assert all(e["run_id"] == run_id for e in events)
+
+
+def test_run_cancel_stops_it(client: TestClient, tmp_path: Path) -> None:
+    export = forge_stub(tmp_path, "kohya", "echo up\nsleep 30\n")
+    run_id = client.post("/run", json={"export_dir": str(export), "trainer": "kohya"}).json()["run_id"]
+    time.sleep(0.4)  # let the subprocess actually launch before cancelling
+    assert client.get(f"/run/{run_id}").json()["status"] == "running"
+    cancel = client.post(f"/run/{run_id}/cancel")
+    assert cancel.status_code == 200
+    assert cancel.json()["status"] == "cancelled"
+    assert client.get(f"/run/{run_id}").json()["status"] == "cancelled"
+
+
+def test_runs_lists_tracked_runs(client: TestClient, tmp_path: Path) -> None:
+    export = forge_stub(tmp_path, "kohya", "echo hi\n")
+    run_id = client.post("/run", json={"export_dir": str(export), "trainer": "kohya"}).json()["run_id"]
+    _wait_terminal(client, run_id)
+    listed = client.get("/runs").json()
+    assert run_id in {r["run_id"] for r in listed}
+
+
+def test_unknown_run_is_404(client: TestClient) -> None:
+    assert client.get("/run/nope").status_code == 404
+    assert client.get("/run/nope/stream").status_code == 404
+    assert client.post("/run/nope/cancel").status_code == 404

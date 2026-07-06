@@ -627,6 +627,94 @@
       "title": "RunRequest",
       "type": "object"
     },
+    "RunState": {
+      "description": "A run's status in the server's job registry (GET /run/{id}, GET /runs).\n\nOutlives the connection that started the run, so a caller can poll for the\nterminal ``status`` + ``returncode`` (the argus-proof handoff) or reconnect\nto the live stream by ``run_id`` long after the launching request is gone.",
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Command",
+          "type": "array"
+        },
+        "cwd": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cwd"
+        },
+        "ended_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ended At"
+        },
+        "export_dir": {
+          "title": "Export Dir",
+          "type": "string"
+        },
+        "returncode": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Returncode"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "started_at": {
+          "title": "Started At",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "running",
+            "succeeded",
+            "failed",
+            "cancelled"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "trainer": {
+          "enum": [
+            "kohya",
+            "onetrainer",
+            "diffusers"
+          ],
+          "title": "Trainer",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "trainer",
+        "export_dir",
+        "status",
+        "started_at"
+      ],
+      "title": "RunState",
+      "type": "object"
+    },
     "SizeHint": {
       "description": "Dataset-size guidance for the target category (mirrors the curate UI).",
       "properties": {

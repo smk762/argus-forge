@@ -268,6 +268,28 @@ class RunEvent(BaseModel):
     returncode: int | None = None
 
 
+RunStatus = Literal["running", "succeeded", "failed", "cancelled"]
+
+
+class RunState(BaseModel):
+    """A run's status in the server's job registry (GET /run/{id}, GET /runs).
+
+    Outlives the connection that started the run, so a caller can poll for the
+    terminal ``status`` + ``returncode`` (the argus-proof handoff) or reconnect
+    to the live stream by ``run_id`` long after the launching request is gone.
+    """
+
+    run_id: str
+    trainer: TrainerId
+    export_dir: str
+    status: RunStatus
+    returncode: int | None = None
+    started_at: str  # ISO-8601 UTC
+    ended_at: str | None = None
+    command: list[str] = Field(default_factory=list)
+    cwd: str | None = None
+
+
 class TrainerInfo(BaseModel):
     """Catalogue entry for GET /trainers."""
 
@@ -296,6 +318,7 @@ WIRE_MODELS: tuple[type[BaseModel], ...] = (
     ForgeResult,
     RunRequest,
     RunEvent,
+    RunState,
     TrainerInfo,
 )
 

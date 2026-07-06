@@ -10,6 +10,7 @@ category and checkpoint then come from CLI/API arguments or defaults.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path, PurePath, PurePosixPath
 
 import structlog
@@ -36,6 +37,17 @@ MANIFEST_NAME = "manifest.jsonl"
 # Forge writes its output under <export_dir>/forge/<trainer>/; anything below
 # that must not count as dataset content.
 FORGE_DIR_NAME = "forge"
+
+
+def resolve_export_dir(export_dir: str) -> Path:
+    """A request's ``export_dir`` as an absolute path.
+
+    Absolute (so emitted paths are really absolute and path_map prefixes can
+    match) but NOT symlink-resolved — symlink-mode exports keep their spelling.
+    The single owner of this policy; every entry point (config, inspect, run)
+    resolves through here so they can't drift.
+    """
+    return Path(os.path.abspath(Path(export_dir).expanduser()))
 
 
 def read_manifest(path: Path) -> list[ManifestRow]:

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
-from conftest import ExportFactory
+from conftest import ExportFactory, forge_stub
 from fastapi.testclient import TestClient
 
 from argus_forge.server import create_app
@@ -74,3 +77,39 @@ def test_config_invalid_trainer_is_422(client: TestClient, export_factory: Expor
     export = export_factory(n=3)
     resp = client.post("/config", json={"export_dir": str(export), "trainer": "dreambooth9000"})
     assert resp.status_code == 422  # pydantic literal validation
+
+
+def test_run_streams_ndjson(client: TestClient, tmp_path: Path) -> None:
+    export = forge_stub(tmp_path, "kohya", "echo hi\n")
+    resp = client.post("/run", json={"export_dir": str(export), "trainer": "kohya"})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/x-ndjson")
+    run_id = resp.headers["x-training-run-id"]
+    events = [json.loads(line) for line in resp.text.splitlines() if line]
+    assert events[0]["type"] == "start"
+    assert any(e["type"] == "log" and e["message"] == "hi" for e in events)
+    assert events[-1]["type"] == "exit" and events[-1]["returncode"] == 0
+    assert all(e["run_id"] == run_id for e in events)
+
+
+def test_run_missing_config_is_400(client: TestClient, tmp_path: Path) -> None:
+    export = tmp_path / "exp"
+    export.mkdir()
+    resp = client.post("/run", json={"export_dir": str(export), "trainer": "kohya"})
+    assert resp.status_code == 400
+    assert "no forged config" in resp.json()["detail"]
+
+
+def test_run_unrunnable_trainer_is_400(client: TestClient, tmp_path: Path) -> None:
+    export = tmp_path / "exp"
+    export.mkdir()
+    resp = client.post("/run", json={"export_dir": str(export), "trainer": "onetrainer"})
+    assert resp.status_code == 400
+    assert "no launcher" in resp.json()["detail"]
+
+
+def test_run_blocked_env_is_400(client: TestClient, tmp_path: Path) -> None:
+    export = forge_stub(tmp_path, "kohya", "echo hi\n")
+    resp = client.post("/run", json={"export_dir": str(export), "trainer": "kohya", "env": {"LD_PRELOAD": "/x.so"}})
+    assert resp.status_code == 400
+    assert "LD_PRELOAD" in resp.json()["detail"]

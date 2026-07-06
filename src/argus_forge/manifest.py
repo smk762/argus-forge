@@ -174,11 +174,17 @@ def exported_collisions(rows: list[ManifestRow], resolved: list[Path | None]) ->
     return {dest: list(rels) for dest, rels in claims.items() if len(rels) > 1}
 
 
-def inspect_export(
+def scan_export(
     export_dir: Path,
     category: TargetCategory | None = None,
-) -> tuple[DatasetInfo, list[ManifestRow]]:
-    """Look at an export dir: images, captions, manifest, suggested params."""
+) -> tuple[DatasetInfo, list[ManifestRow], list[Path | None], list[Path]]:
+    """One pass over an export dir: the derived :class:`DatasetInfo` plus the
+    intermediates it is built from — ``resolved`` (row -> disk path, in manifest
+    order) and ``images`` (on-disk dataset files). Returning them lets a caller
+    that needs both (:func:`argus_forge.core.forge_config`) avoid re-walking the
+    tree and re-stat()ing every row; :func:`inspect_export` is the plain
+    ``(info, rows)`` view for callers that don't.
+    """
     if not export_dir.is_dir():
         raise ForgeError(f"not a directory: {export_dir}")
 
@@ -187,7 +193,7 @@ def inspect_export(
 
     images = find_images(export_dir)
     captions = sum(1 for img in images if caption_path(img).is_file())
-    missing = resolve_rows(export_dir, rows).count(None)
+    resolved = resolve_rows(export_dir, rows)
 
     profile = rows[0].target_profile.model_copy() if rows else TargetProfile()
     if category is not None:
@@ -200,7 +206,7 @@ def inspect_export(
         manifest_present=bool(rows),
         manifest_rows=len(rows),
         manifest_version=rows[0].manifest_version if rows else None,
-        missing_from_disk=missing,
+        missing_from_disk=resolved.count(None),
         target_profile=profile,
         size_hint=dataset_size_status(len(images), profile.target_category),
         suggested=suggest_training_params(len(images), profile.target_category),
@@ -212,4 +218,13 @@ def inspect_export(
         captions=captions,
         manifest_rows=len(rows),
     )
+    return info, rows, resolved, images
+
+
+def inspect_export(
+    export_dir: Path,
+    category: TargetCategory | None = None,
+) -> tuple[DatasetInfo, list[ManifestRow]]:
+    """Look at an export dir: images, captions, manifest, suggested params."""
+    info, rows, _, _ = scan_export(export_dir, category)
     return info, rows

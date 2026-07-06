@@ -7,7 +7,7 @@ import pytest
 from conftest import PNG_1PX, ExportFactory, decollided_export
 from pydantic import ValidationError
 
-from argus_forge.manifest import find_images, inspect_export, read_manifest, resolve_rows
+from argus_forge.manifest import find_images, inspect_export, read_manifest, resolve_rows, scan_export
 from argus_forge.models import ForgeError, ManifestRow
 
 
@@ -200,6 +200,17 @@ def test_manifest_1x_nested_preserved_structure_resolves(export_factory: ExportF
     assert all(row.exported_path is None for row in rows)
     assert info.image_count == 4
     assert info.missing_from_disk == 0
+
+
+def test_scan_export_exposes_reusable_resolved_and_images(export_factory: ExportFactory) -> None:
+    """scan_export returns the resolved + images it already built (so forge_config
+    resolves and walks the tree once), and its summary view equals inspect_export."""
+    export = export_factory(n=5, captions=2)
+    info, rows, resolved, images = scan_export(export)
+    assert len(resolved) == len(rows) == 5
+    assert images == find_images(export)
+    assert info.missing_from_disk == resolved.count(None)
+    assert (info, rows) == inspect_export(export)
 
 
 def test_manifest_row_model_enforces_exported_path_contract() -> None:

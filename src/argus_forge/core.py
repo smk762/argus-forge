@@ -20,9 +20,8 @@ from argus_forge.manifest import (
     FORGE_DIR_NAME,
     caption_path,
     exported_collisions,
-    find_images,
-    inspect_export,
     resolve_rows,
+    scan_export,
 )
 from argus_forge.models import (
     PATH_MAP_ENV,
@@ -140,7 +139,9 @@ def forge_config(req: ForgeRequest) -> ForgeResult:
 
     path_map = resolve_path_map(req.path_map)
 
-    info, rows = inspect_export(export_dir, category=req.category)
+    # One scan up front; reuse its resolved list and image list below instead of
+    # re-walking the tree and re-stat()ing every row.
+    info, rows, resolved, images = scan_export(export_dir, category=req.category)
     if info.image_count == 0:
         raise ForgeError(f"no images found under {export_dir} (supported: {', '.join(sorted(SUPPORTED_EXTS))})")
 
@@ -152,7 +153,6 @@ def forge_config(req: ForgeRequest) -> ForgeResult:
             f"manifest lists {info.manifest_rows} images but {info.image_count} were found — forging for what's on disk"
         )
 
-    resolved = resolve_rows(export_dir, rows)
     collisions = exported_collisions(rows, resolved)
     for dest, rels in sorted(collisions.items()):
         try:
@@ -213,7 +213,7 @@ def forge_config(req: ForgeRequest) -> ForgeResult:
         base_model=base_model,
         trigger=trigger,
         output_name=output_name,
-        images=find_images(export_dir),
+        images=images,
         warnings=warnings,
         path_map=path_map,
     )

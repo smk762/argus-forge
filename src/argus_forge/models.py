@@ -235,6 +235,39 @@ class ForgeResult(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class RunRequest(BaseModel):
+    """POST /run — execute a forged trainer config by shelling out to its train.sh."""
+
+    export_dir: str
+    trainer: TrainerId
+    # Extra environment for the trainer process — typically where its checkout
+    # lives, e.g. {"SD_SCRIPTS_DIR": "/home/you/kohya-ss/sd-scripts"} for kohya
+    # or {"DIFFUSERS_SCRIPT": "/home/you/.../train_...py"} for diffusers.
+    env: dict[str, str] = Field(default_factory=dict)
+    # Resolve and report the command without executing it.
+    dry_run: bool = False
+
+
+RunEventType = Literal["start", "log", "exit", "error"]
+
+
+class RunEvent(BaseModel):
+    """One NDJSON line streamed from a run.
+
+    ``run_id`` (the training_run_id) is stable for the whole run and is the join
+    key for downstream eval (argus-proof). ``type`` selects which fields are set:
+    ``start`` carries ``command`` + ``cwd``; ``log`` a line of trainer output in
+    ``message``; ``exit`` the ``returncode``; ``error`` a failure ``message``.
+    """
+
+    run_id: str
+    type: RunEventType
+    message: str | None = None
+    command: list[str] | None = None
+    cwd: str | None = None
+    returncode: int | None = None
+
+
 class TrainerInfo(BaseModel):
     """Catalogue entry for GET /trainers."""
 
@@ -256,6 +289,8 @@ WIRE_MODELS: tuple[type[BaseModel], ...] = (
     ForgeRequest,
     GeneratedFile,
     ForgeResult,
+    RunRequest,
+    RunEvent,
     TrainerInfo,
 )
 

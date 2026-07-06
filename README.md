@@ -52,7 +52,14 @@ argus-forge config /data/out --trainer kohya           # emit configs
 argus-forge config /data/out -t diffusers --dry-run    # preview without writing
 argus-forge config /data/out --trigger "zxq person" --network-dim 32 --epochs 8
 argus-forge trainers                                   # list emitters
+argus-forge run /data/out --trainer kohya \
+  --env SD_SCRIPTS_DIR=~/kohya-ss/sd-scripts             # run the forged train.sh, streaming progress
 ```
+
+`run` shells out to the forged `train.sh` (kohya / diffusers; OneTrainer is
+driven from its own UI) and streams the trainer's output. It exits with the
+trainer's own exit code, so it slots into scripts and CI; `--dry-run` prints the
+command without executing, and `--json` streams raw NDJSON `RunEvent`s.
 
 ## Server (argus-studio integration)
 
@@ -72,6 +79,7 @@ CORS is opt-in — without it the ExportPanel fails with "Failed to fetch" even 
 | `GET /trainers` | supported trainers + emitted files |
 | `POST /inspect` | look at an export dir (counts, manifest, suggested params) |
 | `POST /config` | render configs; `dry_run: true` returns contents without writing |
+| `POST /run` | shell out to the forged `train.sh`, streaming NDJSON `RunEvent`s (`X-Training-Run-Id` header is the run's join key) |
 
 The `/curate` page's ExportPanel in [argus-studio](https://github.com/smk762/argus-studio) uses this to forge a
 config right after an export (`docker compose --profile forge up`).
@@ -113,6 +121,5 @@ Run `copier update` to pull template changes (CI, release, tooling).
 
 ## Roadmap
 
-- `argus-forge run`: job-runner mode that shells out to the trainer and streams progress
-  (NDJSON/SSE, following the suite's conventions) — [argus-studio#3](https://github.com/smk762/argus-studio/issues/3).
 - argus-proof handoff: post-training validation ([argus-studio#4](https://github.com/smk762/argus-studio/issues/4)).
+  The `X-Training-Run-Id` / `RunEvent.run_id` emitted by `POST /run` is the intended join key.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 from pathlib import Path
@@ -136,6 +137,64 @@ def config(
                 f"\nNext: review {map_path(result.out_dir, effective_map)}/README.md, "
                 f"then run {map_path(run_hint, effective_map)}"
             )
+
+
+@app.command()
+def run(
+    export_dir: Path = Argument(..., help="Forged export dir (contains forge/<trainer>/train.sh)"),
+    trainer: str = Option("kohya", "--trainer", "-t", help="kohya | diffusers (onetrainer has no train.sh)"),
+    env: list[str] = Option(
+        [],
+        "--env",
+        help="Extra env for the trainer as KEY=VALUE (e.g. SD_SCRIPTS_DIR=~/kohya-ss/sd-scripts); one per flag",
+    ),
+    dry_run: bool = Option(False, "--dry-run", help="Print the command that would run, without executing it"),
+    as_json: bool = Option(False, "--json", help="Stream raw NDJSON RunEvents instead of human-readable output"),
+) -> None:
+    """Run a forged training config: shell out to the trainer, streaming progress."""
+    from argus_forge.models import ForgeError, RunRequest
+    from argus_forge.runner import astream_run
+
+    env_map: dict[str, str] = {}
+    for item in env:
+        key, sep, val = item.partition("=")
+        if not sep or not key:
+            typer.echo(f"Error: --env expects KEY=VALUE, got {item!r}", err=True)
+            raise typer.Exit(1)
+        env_map[key] = val
+
+    req = RunRequest(
+        export_dir=str(export_dir),
+        trainer=trainer,  # type: ignore[arg-type]  (pydantic validates the literal)
+        env=env_map,
+        dry_run=dry_run,
+    )
+
+    async def drive() -> int:
+        code = 0
+        async for ev in astream_run(req):
+            if as_json:
+                typer.echo(ev.model_dump_json())
+            elif ev.type == "start":
+                typer.echo(f"▶ run {ev.run_id}: {' '.join(ev.command or [])} (cwd {ev.cwd})")
+                if dry_run:
+                    typer.echo("  dry run — not executing")
+            elif ev.type == "log":
+                typer.echo(ev.message or "")
+            elif ev.type == "exit":
+                code = ev.returncode or 0
+                typer.echo(f"{'✔' if code == 0 else '✗'} run {ev.run_id} finished (exit {code})")
+            elif ev.type == "error":
+                typer.echo(f"Error: {ev.message}", err=True)
+                code = code or 1
+        return code
+
+    try:
+        exit_code = asyncio.run(drive())
+    except ForgeError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    raise typer.Exit(exit_code)
 
 
 @app.command()

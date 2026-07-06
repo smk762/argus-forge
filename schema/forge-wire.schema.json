@@ -515,6 +515,118 @@
       "title": "ParamOverrides",
       "type": "object"
     },
+    "RunEvent": {
+      "description": "One NDJSON line streamed from a run.\n\n``run_id`` (the training_run_id) is stable for the whole run and is the join\nkey for downstream eval (argus-proof). ``type`` selects which fields are set:\n``start`` carries ``command`` + ``cwd``; ``log`` a line of trainer output in\n``message``; ``exit`` the ``returncode``; ``error`` a failure ``message``.",
+      "properties": {
+        "command": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Command"
+        },
+        "cwd": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cwd"
+        },
+        "message": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Message"
+        },
+        "returncode": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Returncode"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "start",
+            "log",
+            "exit",
+            "error"
+          ],
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "type"
+      ],
+      "title": "RunEvent",
+      "type": "object"
+    },
+    "RunRequest": {
+      "description": "POST /run \u2014 execute a forged trainer config by shelling out to its train.sh.",
+      "properties": {
+        "dry_run": {
+          "default": false,
+          "title": "Dry Run",
+          "type": "boolean"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Env",
+          "type": "object"
+        },
+        "export_dir": {
+          "title": "Export Dir",
+          "type": "string"
+        },
+        "trainer": {
+          "enum": [
+            "kohya",
+            "onetrainer",
+            "diffusers"
+          ],
+          "title": "Trainer",
+          "type": "string"
+        }
+      },
+      "required": [
+        "export_dir",
+        "trainer"
+      ],
+      "title": "RunRequest",
+      "type": "object"
+    },
     "SizeHint": {
       "description": "Dataset-size guidance for the target category (mirrors the curate UI).",
       "properties": {

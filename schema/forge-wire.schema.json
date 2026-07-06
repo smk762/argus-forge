@@ -706,6 +706,18 @@
     "TrainerInfo": {
       "description": "Catalogue entry for GET /trainers.",
       "properties": {
+        "entrypoint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Entrypoint"
+        },
         "files": {
           "items": {
             "type": "string"

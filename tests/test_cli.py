@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from conftest import ExportFactory
+from conftest import ExportFactory, forge_stub
 from typer.testing import CliRunner
 
-from argus_forge.cli import app
+from argus_forge.cli import _run_exit_status, app
 
 runner = CliRunner()
 
@@ -61,15 +61,8 @@ def test_config_bad_trainer_fails(export_factory: ExportFactory) -> None:
     assert result.exit_code == 1
 
 
-def _forge_script(tmp_path: Path, trainer: str, body: str) -> Path:
-    out = tmp_path / "exp" / "forge" / trainer
-    out.mkdir(parents=True)
-    (out / "train.sh").write_text("#!/usr/bin/env bash\n" + body, encoding="utf-8")
-    return tmp_path / "exp"
-
-
 def test_run_streams_output_and_exit_code(tmp_path: Path) -> None:
-    export = _forge_script(tmp_path, "kohya", "echo training...\n")
+    export = forge_stub(tmp_path, "kohya", "echo training...\n")
     result = runner.invoke(app, ["run", str(export), "--trainer", "kohya"])
     assert result.exit_code == 0
     assert "training..." in result.output
@@ -77,14 +70,14 @@ def test_run_streams_output_and_exit_code(tmp_path: Path) -> None:
 
 
 def test_run_propagates_trainer_exit_code(tmp_path: Path) -> None:
-    export = _forge_script(tmp_path, "kohya", "exit 5\n")
+    export = forge_stub(tmp_path, "kohya", "exit 5\n")
     result = runner.invoke(app, ["run", str(export), "--trainer", "kohya"])
     assert result.exit_code == 5
 
 
 def test_run_dry_run_prints_command_without_executing(tmp_path: Path) -> None:
     sentinel = tmp_path / "ran"
-    export = _forge_script(tmp_path, "kohya", f'touch "{sentinel}"\n')
+    export = forge_stub(tmp_path, "kohya", f'touch "{sentinel}"\n')
     result = runner.invoke(app, ["run", str(export), "--trainer", "kohya", "--dry-run"])
     assert result.exit_code == 0
     assert "dry run" in result.output
@@ -99,12 +92,38 @@ def test_run_missing_config_errors(tmp_path: Path) -> None:
     assert "no forged config" in result.output
 
 
+def test_run_bad_trainer_is_clean_error_not_traceback(tmp_path: Path) -> None:
+    """An unknown --trainer must fail like `config` does (exit 1 + Error line),
+    not leak an uncaught pydantic ValidationError traceback."""
+    result = runner.invoke(app, ["run", str(tmp_path), "--trainer", "nope"])
+    assert result.exit_code == 1
+    assert "Error:" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+def test_run_signal_death_reports_128_plus_n(tmp_path: Path) -> None:
+    """A trainer killed by a signal exits 128+N (SIGTERM -> 143), per shell
+    convention, not a modulo-256 mangling of the negative return code."""
+    export = forge_stub(tmp_path, "kohya", "kill -TERM $$\n")
+    result = runner.invoke(app, ["run", str(export), "--trainer", "kohya"])
+    assert result.exit_code == 143
+
+
 def test_run_json_streams_ndjson_events(tmp_path: Path) -> None:
-    export = _forge_script(tmp_path, "kohya", "echo hi\n")
+    export = forge_stub(tmp_path, "kohya", "echo hi\n")
     result = runner.invoke(app, ["run", str(export), "--trainer", "kohya", "--json"])
     assert result.exit_code == 0
     types = [json.loads(line)["type"] for line in result.output.splitlines() if line.strip().startswith("{")]
     assert types[0] == "start" and types[-1] == "exit"
+
+
+def test_run_exit_status_mapping() -> None:
+    assert _run_exit_status(0, False) == 0
+    assert _run_exit_status(3, False) == 3
+    assert _run_exit_status(-9, False) == 137  # SIGKILL -> 128+9
+    assert _run_exit_status(None, True) == 1  # errored, never exited
+    assert _run_exit_status(None, False) == 0
+    assert _run_exit_status(0, True) == 1  # error seen -> never report success
 
 
 def test_schema_write_and_check(tmp_path: Path) -> None:

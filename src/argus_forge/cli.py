@@ -1,4 +1,4 @@
-"""argus-forge CLI — ``config``, ``inspect``, ``trainers``, ``schema``, ``serve``."""
+"""argus-forge CLI — ``config``, ``run``, ``inspect``, ``trainers``, ``schema``, ``serve``."""
 
 from __future__ import annotations
 
@@ -139,6 +139,17 @@ def config(
             )
 
 
+def _run_exit_status(returncode: int | None, error_seen: bool) -> int:
+    """The CLI's own exit code for a run: the trainer's return code (128+N for a
+    signal death, per shell convention), or 1 if the run errored without a clean
+    exit. Keeps a signal-killed or errored run from ever reporting success."""
+    if returncode is None:
+        return 1 if error_seen else 0
+    if returncode < 0:  # killed by signal -N
+        return 128 + (-returncode)
+    return returncode or (1 if error_seen else 0)
+
+
 @app.command()
 def run(
     export_dir: Path = Argument(..., help="Forged export dir (contains forge/<trainer>/train.sh)"),
@@ -163,31 +174,37 @@ def run(
             raise typer.Exit(1)
         env_map[key] = val
 
-    req = RunRequest(
-        export_dir=str(export_dir),
-        trainer=trainer,  # type: ignore[arg-type]  (pydantic validates the literal)
-        env=env_map,
-        dry_run=dry_run,
-    )
+    try:
+        req = RunRequest(
+            export_dir=str(export_dir),
+            trainer=trainer,  # type: ignore[arg-type]  (pydantic validates the literal)
+            env=env_map,
+            dry_run=dry_run,
+        )
+    except ValueError as exc:  # pydantic ValidationError, e.g. an unknown --trainer
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
 
     async def drive() -> int:
-        code = 0
+        returncode: int | None = None
+        error_seen = False
         async for ev in astream_run(req):
             if as_json:
                 typer.echo(ev.model_dump_json())
-            elif ev.type == "start":
+                continue
+            if ev.type == "start":
                 typer.echo(f"▶ run {ev.run_id}: {' '.join(ev.command or [])} (cwd {ev.cwd})")
                 if dry_run:
                     typer.echo("  dry run — not executing")
             elif ev.type == "log":
                 typer.echo(ev.message or "")
             elif ev.type == "exit":
-                code = ev.returncode or 0
-                typer.echo(f"{'✔' if code == 0 else '✗'} run {ev.run_id} finished (exit {code})")
+                returncode = ev.returncode
+                typer.echo(f"{'✔' if returncode == 0 else '✗'} run {ev.run_id} finished (exit {returncode})")
             elif ev.type == "error":
+                error_seen = True
                 typer.echo(f"Error: {ev.message}", err=True)
-                code = code or 1
-        return code
+        return _run_exit_status(returncode, error_seen)
 
     try:
         exit_code = asyncio.run(drive())

@@ -19,28 +19,31 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 
+import structlog
+
 try:
     from fastapi import FastAPI, HTTPException
     from fastapi.responses import StreamingResponse
 except ImportError as exc:  # pragma: no cover
     raise ImportError("Server requires: pip install argus-forge[server]") from exc
 
-from pathlib import Path
-
 from argus_forge import __version__
 from argus_forge.core import forge_config
 from argus_forge.emitters import TRAINER_INFO
-from argus_forge.manifest import inspect_export
+from argus_forge.manifest import inspect_export, resolve_export_dir
 from argus_forge.models import (
     DatasetInfo,
     ForgeError,
     ForgeRequest,
     ForgeResult,
     InspectRequest,
+    RunEvent,
     RunRequest,
     TrainerInfo,
 )
 from argus_forge.runner import astream_run, new_run_id, prepare_run
+
+logger = structlog.get_logger()
 
 
 def create_app(cors: bool = False, cors_origins: list[str] | None = None) -> FastAPI:
@@ -73,7 +76,7 @@ def create_app(cors: bool = False, cors_origins: list[str] | None = None) -> Fas
     @app.post("/inspect", response_model=DatasetInfo)
     async def inspect(req: InspectRequest) -> DatasetInfo:
         try:
-            info, _ = await asyncio.to_thread(inspect_export, Path(req.export_dir).expanduser(), req.category)
+            info, _ = await asyncio.to_thread(inspect_export, resolve_export_dir(req.export_dir), req.category)
         except ForgeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return info
@@ -89,18 +92,27 @@ def create_app(cors: bool = False, cors_origins: list[str] | None = None) -> Fas
 
     @app.post("/run")
     async def run(req: RunRequest) -> StreamingResponse:
-        # Validate before opening the stream so a missing/invalid config is a 400,
-        # not a broken NDJSON body (HTTP status is fixed once streaming starts).
+        # Validate (off the event loop) before opening the stream so a missing or
+        # invalid config is a 400, not a broken NDJSON body — HTTP status is fixed
+        # once streaming starts. Reuse the resolved command so it isn't re-derived.
         try:
-            prepare_run(req)
+            resolved = await asyncio.to_thread(prepare_run, req)
         except ForgeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         run_id = new_run_id()
 
         async def body() -> AsyncIterator[str]:
-            async for event in astream_run(req, run_id=run_id):
-                yield event.model_dump_json() + "\n"
+            # Once 200 is committed a failure can't change the status, so surface
+            # any error as a terminal RunEvent rather than truncating the stream.
+            # (A client disconnect raises CancelledError, not Exception, so it
+            # propagates — astream_run's finally still reaps the process.)
+            try:
+                async for event in astream_run(req, run_id=run_id, resolved=resolved):
+                    yield event.model_dump_json() + "\n"
+            except Exception as exc:
+                logger.exception("run_stream_failed", run_id=run_id)
+                yield RunEvent(run_id=run_id, type="error", message=f"run failed: {exc}").model_dump_json() + "\n"
 
         return StreamingResponse(
             body(),

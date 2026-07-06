@@ -126,3 +126,14 @@ def decollided_export(tmp_path: Path, with_source_captions: bool = False) -> Pat
         )
     (export / "manifest.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
     return export
+
+
+def forge_stub(tmp_path: Path, trainer: str, body: str) -> Path:
+    """A minimal forged export for the runner tests: ``forge/<trainer>/train.sh``
+    containing *body* (a trivial runnable bash stub, not a real accelerate line).
+    Returns the export dir. Shared so the runner/CLI/server tests can't drift on
+    the ``forge/<trainer>/train.sh`` layout convention."""
+    out = tmp_path / "exp" / "forge" / trainer
+    out.mkdir(parents=True)
+    (out / "train.sh").write_text("#!/usr/bin/env bash\n" + body, encoding="utf-8")
+    return tmp_path / "exp"

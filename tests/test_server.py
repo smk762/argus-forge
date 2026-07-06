@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import ExportFactory
+from conftest import ExportFactory, forge_stub
 from fastapi.testclient import TestClient
 
 from argus_forge.server import create_app
@@ -79,15 +79,8 @@ def test_config_invalid_trainer_is_422(client: TestClient, export_factory: Expor
     assert resp.status_code == 422  # pydantic literal validation
 
 
-def _forge_script(tmp_path: Path, trainer: str, body: str) -> Path:
-    out = tmp_path / "exp" / "forge" / trainer
-    out.mkdir(parents=True)
-    (out / "train.sh").write_text("#!/usr/bin/env bash\n" + body, encoding="utf-8")
-    return tmp_path / "exp"
-
-
 def test_run_streams_ndjson(client: TestClient, tmp_path: Path) -> None:
-    export = _forge_script(tmp_path, "kohya", "echo hi\n")
+    export = forge_stub(tmp_path, "kohya", "echo hi\n")
     resp = client.post("/run", json={"export_dir": str(export), "trainer": "kohya"})
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("application/x-ndjson")
@@ -112,4 +105,11 @@ def test_run_unrunnable_trainer_is_400(client: TestClient, tmp_path: Path) -> No
     export.mkdir()
     resp = client.post("/run", json={"export_dir": str(export), "trainer": "onetrainer"})
     assert resp.status_code == 400
-    assert "produces no train.sh" in resp.json()["detail"]
+    assert "no launcher" in resp.json()["detail"]
+
+
+def test_run_blocked_env_is_400(client: TestClient, tmp_path: Path) -> None:
+    export = forge_stub(tmp_path, "kohya", "echo hi\n")
+    resp = client.post("/run", json={"export_dir": str(export), "trainer": "kohya", "env": {"LD_PRELOAD": "/x.so"}})
+    assert resp.status_code == 400
+    assert "LD_PRELOAD" in resp.json()["detail"]

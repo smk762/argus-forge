@@ -275,6 +275,11 @@ class TrainerInfo(BaseModel):
     label: str
     files: list[str]
     notes: str
+    # The runnable launcher script this trainer emits (relative to the forge out
+    # dir), or None if it has none (OneTrainer is driven from its own UI). This
+    # is the machine contract `argus-forge run` keys off — distinct from the
+    # human-readable ``files`` list.
+    entrypoint: str | None = None
 
 
 # Models that make up the HTTP/CLI wire contract, in schema order.

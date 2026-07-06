@@ -20,6 +20,7 @@ from argus_forge.manifest import (
     FORGE_DIR_NAME,
     caption_path,
     exported_collisions,
+    resolve_export_dir,
     resolve_rows,
     scan_export,
 )
@@ -131,9 +132,7 @@ def collect_captions(
 
 def forge_config(req: ForgeRequest) -> ForgeResult:
     """Render (and unless ``dry_run``, write) trainer configs for an export dir."""
-    # Absolute (but not symlink-resolved: symlink-mode exports keep their spelling)
-    # so emitted paths are really absolute and path_map prefixes can match.
-    export_dir = Path(os.path.abspath(Path(req.export_dir).expanduser()))
+    export_dir = resolve_export_dir(req.export_dir)
     if req.trainer not in EMITTERS:
         raise ForgeError(f"unknown trainer: {req.trainer} (expected one of {', '.join(EMITTERS)})")
 

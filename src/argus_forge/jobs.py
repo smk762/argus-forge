@@ -28,9 +28,14 @@ from argus_forge.runner import astream_run, new_run_id
 
 logger = structlog.get_logger()
 
-# Recent events retained per run for reconnecting viewers (start/terminal events
-# are few and effectively always retained; this bounds the log tail).
+# Recent events retained per run for reconnecting viewers. The tail of the log
+# is bounded; the run's `start` event is retained out-of-band (see Job._start)
+# so command/cwd survive on the stream even past this window.
 MAX_BUFFERED_EVENTS = 2000
+# How far a single /stream viewer may fall behind before its queue starts
+# dropping its oldest un-read events. Bounds the memory one stalled reader can
+# pin, independently of MAX_BUFFERED_EVENTS (which bounds only the shared tail).
+MAX_SUBSCRIBER_LAG = MAX_BUFFERED_EVENTS
 # Finished runs kept in the registry (most-recent-first) before eviction.
 MAX_FINISHED_JOBS = 64
 
@@ -39,6 +44,22 @@ _SENTINEL = object()  # queued to a subscriber to signal end-of-stream
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _offer(q: asyncio.Queue[object], item: object) -> None:
+    """Enqueue *item* for a subscriber without ever blocking the producer.
+
+    A viewer that has fallen ``MAX_SUBSCRIBER_LAG`` events behind (a stalled or
+    half-open /stream reader) drops its oldest un-read event to make room, so
+    one slow consumer can't grow the server's memory without bound. The
+    end-of-stream sentinel is enqueued the same way, so it is never lost.
+    """
+    try:
+        q.put_nowait(item)
+    except asyncio.QueueFull:
+        with contextlib.suppress(asyncio.QueueEmpty):
+            q.get_nowait()
+        q.put_nowait(item)
 
 
 class Job:
@@ -55,9 +76,13 @@ class Job:
         self.started_at = _now()
         self.ended_at: str | None = None
         self._events: deque[RunEvent] = deque(maxlen=MAX_BUFFERED_EVENTS)
+        # The `start` event is retained out-of-band so a viewer reconnecting to a
+        # long run still learns command/cwd even after it rolls off `_events`.
+        self._start: RunEvent | None = None
         self._subscribers: set[asyncio.Queue[object]] = set()
         self._done = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
+        self._cancelling = False
 
     @property
     def finished(self) -> bool:
@@ -77,9 +102,11 @@ class Job:
         )
 
     def _publish(self, ev: RunEvent) -> None:
+        if ev.type == "start":
+            self._start = ev
         self._events.append(ev)
         for q in self._subscribers:
-            q.put_nowait(ev)
+            _offer(q, ev)
 
     async def subscribe(self) -> AsyncIterator[RunEvent]:
         """Yield the buffered backlog, then live events until the run ends.
@@ -87,10 +114,13 @@ class Job:
         Snapshot + register happen with no ``await`` between them, so the split
         between backlog and live queue is atomic — no event is dropped or
         duplicated across it. A viewer joining a finished run just replays the
-        retained buffer.
+        retained buffer. The `start` event is prepended if it has already rolled
+        off the bounded tail, so command/cwd are always the first thing seen.
         """
-        q: asyncio.Queue[object] = asyncio.Queue()
+        q: asyncio.Queue[object] = asyncio.Queue(maxsize=MAX_SUBSCRIBER_LAG)
         backlog = list(self._events)
+        if self._start is not None and self._start not in backlog:
+            backlog.insert(0, self._start)
         done = self._done.is_set()
         self._subscribers.add(q)
         try:
@@ -107,35 +137,60 @@ class Job:
         finally:
             self._subscribers.discard(q)
 
+    def _finalize(self, status: RunStatus) -> None:
+        """Record terminal state exactly once and release every viewer.
+
+        Idempotent: the first caller wins. ``_drive``'s ``finally`` is the normal
+        path, but ``cancel`` also calls this so a task cancelled before it ever
+        ran (its ``finally`` never fires) can't wedge the job as ``running``.
+        """
+        if self._done.is_set():
+            return
+        self.status = status
+        self.ended_at = _now()
+        self._done.set()
+        for q in list(self._subscribers):
+            _offer(q, _SENTINEL)
+
     async def _drive(self) -> None:
+        status: RunStatus = "succeeded"  # a run that ends without a terminal event (dry_run) still succeeded
         try:
             async for ev in astream_run(self.req, run_id=self.run_id, resolved=(self.command, self.cwd)):
                 self._publish(ev)
                 if ev.type == "exit":
                     self.returncode = ev.returncode
-                    self.status = "succeeded" if ev.returncode == 0 else "failed"
+                    status = "succeeded" if ev.returncode == 0 else "failed"
                 elif ev.type == "error":
-                    self.status = "failed"
+                    status = "failed"
         except asyncio.CancelledError:
             # Explicit cancel: astream_run's finally already reaped the process
-            # group; record it and let viewers finish cleanly.
-            self.status = "cancelled"
+            # group; record it, tell viewers, and re-raise so the task ends
+            # cancelled (so cancel()/shutdown() observe a true cancellation).
             self._publish(RunEvent(run_id=self.run_id, type="error", message="run cancelled"))
+            self._finalize("cancelled")
+            raise
         except Exception as exc:  # pragma: no cover - defensive; astream_run handles its own
             logger.exception("job_failed", run_id=self.run_id)
-            self.status = "failed"
             self._publish(RunEvent(run_id=self.run_id, type="error", message=f"run failed: {exc}"))
-        finally:
-            self.ended_at = _now()
-            self._done.set()
-            for q in list(self._subscribers):
-                q.put_nowait(_SENTINEL)
+            status = "failed"
+        self._finalize(status)
 
     async def cancel(self) -> None:
-        if self._task is not None and not self._task.done():
-            self._task.cancel()
+        # Guard against a re-entrant cancel (a double-clicked UI, a retry after
+        # the request-side wait): re-cancelling a task already unwinding inside
+        # runner._terminate's SIGTERM grace would abort its SIGKILL escalation
+        # and orphan the trainer. There is no await between the read and the set.
+        if self._cancelling:
+            return
+        self._cancelling = True
+        task = self._task
+        if task is not None and not task.done():
+            task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await self._task
+                await task
+        # If the task was cancelled before its first step, _drive's body — and
+        # so its finalize — never ran; make sure the job doesn't stay "running".
+        self._finalize("cancelled")
 
 
 class JobRegistry:
@@ -164,9 +219,10 @@ class JobRegistry:
 
     async def shutdown(self) -> None:
         """Cancel every in-flight run (server stopping) so no trainer is left
-        without an owner in this process."""
-        for job in list(self._jobs.values()):
-            await job.cancel()
+        without an owner in this process. Cancels concurrently so total time is
+        one SIGTERM grace period, not one per run (which would overrun the
+        container's stop grace and leave the later runs un-reaped)."""
+        await asyncio.gather(*(job.cancel() for job in list(self._jobs.values())))
 
     def _evict(self) -> None:
         finished = sorted((j for j in self._jobs.values() if j.finished), key=lambda j: j.ended_at or "")

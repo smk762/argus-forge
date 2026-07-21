@@ -144,6 +144,16 @@ def test_run_executes_without_a_consumer(client: TestClient, tmp_path: Path) -> 
     assert final["started_at"] and final["ended_at"]
 
 
+def test_dry_run_reaches_terminal_status(client: TestClient, tmp_path: Path) -> None:
+    """A dry run yields only `start` and executes nothing, but must still reach a
+    terminal status — a poller of the argus-proof join must not hang forever."""
+    export = forge_stub(tmp_path, "kohya", "echo hi\n")
+    run_id = client.post("/run", json={"export_dir": str(export), "trainer": "kohya", "dry_run": True}).json()["run_id"]
+    final = _wait_terminal(client, run_id)
+    assert final["status"] == "succeeded"
+    assert final["ended_at"]
+
+
 def test_run_stream_reconnect_replays_backlog_and_terminal(client: TestClient, tmp_path: Path) -> None:
     export = forge_stub(tmp_path, "kohya", "echo one\necho two\n")
     run_id = client.post("/run", json={"export_dir": str(export), "trainer": "kohya"}).json()["run_id"]

@@ -516,7 +516,7 @@
       "type": "object"
     },
     "RunEvent": {
-      "description": "One NDJSON line streamed from a run.\n\n``run_id`` (the training_run_id) is stable for the whole run and is the join\nkey for downstream eval (argus-proof). ``type`` selects which fields are set:\n``start`` carries ``command`` + ``cwd``; ``log`` a line of trainer output in\n``message``; ``exit`` the ``returncode``; ``error`` a failure ``message``.",
+      "description": "One NDJSON line streamed from a run.\n\n``run_id`` (the training_run_id) is stable for the whole run and is the join\nkey for downstream eval (argus-proof). ``type`` selects which fields are set:\n``start`` carries ``command`` + ``cwd``; ``log`` a line of trainer output in\n``message``; ``exit`` the ``returncode``; ``error`` a failure ``message``.\n``cancelled`` is the terminal event for a run stopped by request \u2014 distinct\nfrom ``error`` so a consumer never mistakes a user cancel for a failure.",
       "properties": {
         "command": {
           "anyOf": [
@@ -578,7 +578,8 @@
             "start",
             "log",
             "exit",
-            "error"
+            "error",
+            "cancelled"
           ],
           "title": "Type",
           "type": "string"
@@ -625,6 +626,106 @@
         "trainer"
       ],
       "title": "RunRequest",
+      "type": "object"
+    },
+    "RunState": {
+      "description": "A run's status in the server's job registry (GET /run/{id}, GET /runs).\n\nOutlives the connection that started the run, so a caller can poll for the\nterminal ``status`` + ``returncode`` (the argus-proof handoff) or reconnect\nto the live stream by ``run_id`` long after the launching request is gone.",
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Command",
+          "type": "array"
+        },
+        "cwd": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cwd"
+        },
+        "ended_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ended At"
+        },
+        "export_dir": {
+          "title": "Export Dir",
+          "type": "string"
+        },
+        "message": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Message"
+        },
+        "returncode": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Returncode"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "started_at": {
+          "title": "Started At",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "running",
+            "succeeded",
+            "failed",
+            "cancelled"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "trainer": {
+          "enum": [
+            "kohya",
+            "onetrainer",
+            "diffusers"
+          ],
+          "title": "Trainer",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "trainer",
+        "export_dir",
+        "status",
+        "started_at"
+      ],
+      "title": "RunState",
       "type": "object"
     },
     "SizeHint": {

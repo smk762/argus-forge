@@ -79,10 +79,19 @@ CORS is opt-in — without it the ExportPanel fails with "Failed to fetch" even 
 | `GET /trainers` | supported trainers + emitted files |
 | `POST /inspect` | look at an export dir (counts, manifest, suggested params) |
 | `POST /config` | render configs; `dry_run: true` returns contents without writing |
-| `POST /run` | shell out to the forged `train.sh`, streaming NDJSON `RunEvent`s (`X-Training-Run-Id` header is the run's join key) |
+| `POST /run` | start the forged `train.sh` on a background job; returns the run's `RunState` (with `run_id`) — the run outlives the request |
+| `GET /runs` | list tracked runs |
+| `GET /run/{id}` | a run's status (poll for the terminal `status` + `returncode` — the argus-proof join) |
+| `GET /run/{id}/stream` | attach to a run: NDJSON `RunEvent`s, buffered backlog then live; reconnect anytime |
+| `POST /run/{id}/cancel` | stop a run (SIGTERM→SIGKILL its process group) |
 
-The `/curate` page's ExportPanel in [argus-studio](https://github.com/smk762/argus-studio) uses this to forge a
-config right after an export (`docker compose --profile forge up`).
+A run is started once (`POST /run`) and watched — or re-watched after a dropped connection — via
+`GET /run/{id}/stream`; a client going away never stops the run. `run_id` (also on the stream's
+`X-Training-Run-Id` header) is the join key for the argus-proof handoff. The `/curate` page's ExportPanel in
+[argus-studio](https://github.com/smk762/argus-studio) uses `/config` to forge a config right after an export
+(`docker compose --profile forge up`).
+
+> The local CLI `argus-forge run` streams live in your terminal and is independent of the server registry.
 
 ### Container ↔ host paths (`path_map`)
 
@@ -122,4 +131,6 @@ Run `copier update` to pull template changes (CI, release, tooling).
 ## Roadmap
 
 - argus-proof handoff: post-training validation ([argus-studio#4](https://github.com/smk762/argus-studio/issues/4)).
-  The `X-Training-Run-Id` / `RunEvent.run_id` emitted by `POST /run` is the intended join key.
+  `GET /run/{id}` now exposes a run's terminal `status` + `returncode` by `run_id` for the join.
+- run registry follow-ups ([#13](https://github.com/smk762/argus-forge/issues/13)): CLI management commands
+  (`runs` / `--attach` / `--cancel`), an optional single-flight guard, and durable run metadata across restarts.

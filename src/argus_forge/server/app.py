@@ -2,27 +2,32 @@
 
 Routes:
 
-    GET  /health    -> {status, service, version}
-    GET  /trainers  -> list[TrainerInfo]
-    POST /inspect   -> DatasetInfo       (read-only look at an export dir)
-    POST /config    -> ForgeResult       (render configs; dry_run for preview)
-    POST /run       -> NDJSON stream     (shell out to the forged trainer)
+    GET  /health           -> {status, service, version}
+    GET  /trainers         -> list[TrainerInfo]
+    POST /inspect          -> DatasetInfo    (read-only look at an export dir)
+    POST /config           -> ForgeResult    (render configs; dry_run for preview)
+    POST /run              -> RunState        (start a background run, return its id)
+    GET  /runs             -> list[RunState]  (registry of tracked runs)
+    GET  /run/{id}         -> RunState        (status; poll for terminal result)
+    GET  /run/{id}/stream  -> NDJSON stream   (attach: backlog + live events)
+    POST /run/{id}/cancel  -> RunState        (stop the run's process group)
 
 Config generation is filesystem work on the shared dataset volume — the same
 trust model as argus-curator's /export (single-user LAN tool; the UI sends
-container paths like /data/out/...). /run additionally shells out to a script
-forge generated; see :mod:`argus_forge.runner`.
+container paths like /data/out/...). ``POST /run`` shells out to a script forge
+generated (see :mod:`argus_forge.runner`) on a background job that outlives the
+request (see :mod:`argus_forge.jobs`): it returns the run's id immediately, and
+progress is watched (and re-watched) via ``GET /run/{id}/stream``.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-
-import structlog
+from contextlib import asynccontextmanager
 
 try:
-    from fastapi import FastAPI, HTTPException
+    from fastapi import Depends, FastAPI, HTTPException
     from fastapi.responses import StreamingResponse
 except ImportError as exc:  # pragma: no cover
     raise ImportError("Server requires: pip install argus-forge[server]") from exc
@@ -30,6 +35,7 @@ except ImportError as exc:  # pragma: no cover
 from argus_forge import __version__
 from argus_forge.core import forge_config
 from argus_forge.emitters import TRAINER_INFO
+from argus_forge.jobs import Job, JobRegistry
 from argus_forge.manifest import inspect_export, resolve_export_dir
 from argus_forge.models import (
     DatasetInfo,
@@ -39,19 +45,47 @@ from argus_forge.models import (
     InspectRequest,
     RunEvent,
     RunRequest,
+    RunState,
     TrainerInfo,
 )
-from argus_forge.runner import astream_run, new_run_id, prepare_run
+from argus_forge.runner import prepare_run
 
-logger = structlog.get_logger()
+
+class NDJSONResponse(StreamingResponse):
+    """StreamingResponse fixed to NDJSON, so the route's OpenAPI advertises
+    ``application/x-ndjson`` instead of the default (misleading) JSON."""
+
+    media_type = "application/x-ndjson"
+
+
+async def _ndjson(events: AsyncIterator[RunEvent]) -> AsyncIterator[str]:
+    async for event in events:
+        yield event.model_dump_json() + "\n"
+
+
+def _stream(job: Job) -> NDJSONResponse:
+    """An NDJSON view of *job* — backlog then live events — tagged with its run id."""
+    return NDJSONResponse(_ndjson(job.subscribe()), headers={"X-Training-Run-Id": job.run_id})
 
 
 def create_app(cors: bool = False, cors_origins: list[str] | None = None) -> FastAPI:
     """Create the forge FastAPI application."""
+    registry = JobRegistry()
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        # No startup work; on shutdown, cancel every in-flight run so no trainer
+        # is left without an owner in this process.
+        try:
+            yield
+        finally:
+            await registry.shutdown()
+
     app = FastAPI(
         title="Argus Forge",
         description="Training bridge: curated exports in, ready-to-run LoRA training configs out.",
         version=__version__,
+        lifespan=lifespan,
     )
 
     if cors:
@@ -63,6 +97,9 @@ def create_app(cors: bool = False, cors_origins: list[str] | None = None) -> Fas
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
+            # Non-simple headers are hidden from cross-origin JS unless exposed;
+            # the run-id join key rides here on GET /run/{id}/stream.
+            expose_headers=["X-Training-Run-Id"],
         )
 
     @app.get("/health")
@@ -90,34 +127,41 @@ def create_app(cors: bool = False, cors_origins: list[str] | None = None) -> Fas
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"forge failed: {exc}") from exc
 
-    @app.post("/run")
-    async def run(req: RunRequest) -> StreamingResponse:
-        # Validate (off the event loop) before opening the stream so a missing or
-        # invalid config is a 400, not a broken NDJSON body — HTTP status is fixed
-        # once streaming starts. Reuse the resolved command so it isn't re-derived.
+    @app.post("/run", response_model=RunState, status_code=202)
+    async def run(req: RunRequest) -> RunState:
+        # Validate (off the event loop) up front so a missing/invalid config is a
+        # 400. The run then executes on a background job that outlives this
+        # request; the caller gets its id back and watches via GET /run/{id}/stream.
         try:
-            resolved = await asyncio.to_thread(prepare_run, req)
+            command, cwd = await asyncio.to_thread(prepare_run, req)
         except ForgeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return registry.start(req, command, cwd).state()
 
-        run_id = new_run_id()
+    @app.get("/runs", response_model=list[RunState])
+    async def runs() -> list[RunState]:
+        return [job.state() for job in registry.list()]
 
-        async def body() -> AsyncIterator[str]:
-            # Once 200 is committed a failure can't change the status, so surface
-            # any error as a terminal RunEvent rather than truncating the stream.
-            # (A client disconnect raises CancelledError, not Exception, so it
-            # propagates — astream_run's finally still reaps the process.)
-            try:
-                async for event in astream_run(req, run_id=run_id, resolved=resolved):
-                    yield event.model_dump_json() + "\n"
-            except Exception as exc:
-                logger.exception("run_stream_failed", run_id=run_id)
-                yield RunEvent(run_id=run_id, type="error", message=f"run failed: {exc}").model_dump_json() + "\n"
+    def _require_job(run_id: str) -> Job:
+        """Resolve a run by id or 404 — shared by the three /run/{id} endpoints."""
+        job = registry.get(run_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"no such run: {run_id}")
+        return job
 
-        return StreamingResponse(
-            body(),
-            media_type="application/x-ndjson",
-            headers={"X-Training-Run-Id": run_id},
-        )
+    NOT_FOUND = {404: {"description": "no such run"}}
+
+    @app.get("/run/{run_id}", response_model=RunState, responses=NOT_FOUND)
+    async def run_status(job: Job = Depends(_require_job)) -> RunState:
+        return job.state()
+
+    @app.get("/run/{run_id}/stream", response_class=NDJSONResponse, responses=NOT_FOUND)
+    async def run_stream(job: Job = Depends(_require_job)) -> NDJSONResponse:
+        return _stream(job)
+
+    @app.post("/run/{run_id}/cancel", response_model=RunState, responses=NOT_FOUND)
+    async def run_cancel(job: Job = Depends(_require_job)) -> RunState:
+        await job.cancel()
+        return job.state()
 
     return app

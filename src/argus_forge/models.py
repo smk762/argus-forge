@@ -248,7 +248,7 @@ class RunRequest(BaseModel):
     dry_run: bool = False
 
 
-RunEventType = Literal["start", "log", "exit", "error"]
+RunEventType = Literal["start", "log", "exit", "error", "cancelled"]
 
 
 class RunEvent(BaseModel):
@@ -258,6 +258,8 @@ class RunEvent(BaseModel):
     key for downstream eval (argus-proof). ``type`` selects which fields are set:
     ``start`` carries ``command`` + ``cwd``; ``log`` a line of trainer output in
     ``message``; ``exit`` the ``returncode``; ``error`` a failure ``message``.
+    ``cancelled`` is the terminal event for a run stopped by request — distinct
+    from ``error`` so a consumer never mistakes a user cancel for a failure.
     """
 
     run_id: str
@@ -266,6 +268,31 @@ class RunEvent(BaseModel):
     command: list[str] | None = None
     cwd: str | None = None
     returncode: int | None = None
+
+
+RunStatus = Literal["running", "succeeded", "failed", "cancelled"]
+
+
+class RunState(BaseModel):
+    """A run's status in the server's job registry (GET /run/{id}, GET /runs).
+
+    Outlives the connection that started the run, so a caller can poll for the
+    terminal ``status`` + ``returncode`` (the argus-proof handoff) or reconnect
+    to the live stream by ``run_id`` long after the launching request is gone.
+    """
+
+    run_id: str
+    trainer: TrainerId
+    export_dir: str
+    status: RunStatus
+    returncode: int | None = None
+    started_at: str  # ISO-8601 UTC
+    ended_at: str | None = None
+    command: list[str] = Field(default_factory=list)
+    cwd: str | None = None
+    # Terminal detail — the launch/failure/cancel reason, when there is one — so
+    # a poller can diagnose a ``failed``/``cancelled`` run without the event log.
+    message: str | None = None
 
 
 class TrainerInfo(BaseModel):
@@ -296,6 +323,7 @@ WIRE_MODELS: tuple[type[BaseModel], ...] = (
     ForgeResult,
     RunRequest,
     RunEvent,
+    RunState,
     TrainerInfo,
 )
 

@@ -44,6 +44,13 @@ uv pip install "argus-forge[cli]"          # CLI
 uv pip install "argus-forge[cli,server]"   # + HTTP server for argus-studio
 ```
 
+Or run the published image (serves `:8103` with `--cors`):
+
+```bash
+docker run --rm -p 8103:8103 -v /path/to/out:/data/out ghcr.io/smk762/argus-forge:latest
+docker compose up          # local build; see docker-compose.yaml for the knobs
+```
+
 ## CLI
 
 ```bash
@@ -75,7 +82,7 @@ CORS is opt-in — without it the ExportPanel fails with "Failed to fetch" even 
 
 | Route | Purpose |
 | ----- | ------- |
-| `GET /health` | liveness + version |
+| `GET /health` | liveness + version + whether training is enabled |
 | `GET /trainers` | supported trainers + emitted files |
 | `POST /inspect` | look at an export dir (counts, manifest, suggested params) |
 | `POST /config` | render configs; `dry_run: true` returns contents without writing |
@@ -92,6 +99,23 @@ A run is started once (`POST /run`) and watched — or re-watched after a droppe
 (`docker compose --profile forge up`).
 
 > The local CLI `argus-forge run` streams live in your terminal and is independent of the server registry.
+
+### Demo-safe mode (no training)
+
+`POST /run` executes a script on the host. It runs a forged `train.sh` on the shared dataset volume — the
+same single-user LAN assumption as `/config` — but it is **not sandboxed**: treat reaching the port as
+equivalent to shell access on the host.
+
+So a host that should render configs but never train — a public demo, a box with no GPU or no `sd-scripts`
+— starts forge in demo-safe mode:
+
+```bash
+argus-forge serve --cors --no-run       # or: ARGUS_FORGE_READONLY=1 argus-forge serve --cors
+```
+
+`/inspect` and `/config` (including `dry_run`) are untouched; `POST /run` refuses with **403** and a message
+saying training is disabled on this host. `GET /health` reports `"training": "enabled" | "disabled"`, so a
+frontend can disable its train button up front rather than discovering the refusal by clicking it.
 
 ### Container ↔ host paths (`path_map`)
 

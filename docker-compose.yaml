@@ -1,0 +1,27 @@
+services:
+  argus-forge:
+    build:
+      context: .
+      # hatch-vcs can't read git history from the build context (.git is
+      # ignored) — hand the version in. Release images get the tag; local
+      # builds get the 0.0.0 default.
+      args:
+        VERSION: ${FORGE_VERSION:-0.0.0}
+    ports:
+      - "${FORGE_PORT:-8103}:8103"
+    environment:
+      # Demo-safe mode: serve /config, refuse POST /run with 403. Set to 1 on
+      # any host without a GPU + sd-scripts, and on any publicly reachable one
+      # — a run is real code execution on the host (see runner.py's trust note).
+      ARGUS_FORGE_READONLY: ${ARGUS_FORGE_READONLY:-0}
+      # Rewrite manifest source paths into container paths in emitted configs,
+      # e.g. FORGE_PATH_MAP=/home/me/pics=/data/images. Empty = no rewriting.
+      FORGE_PATH_MAP: ${FORGE_PATH_MAP:-}
+      # Where the trainer checkout lives, for POST /run. Irrelevant in readonly
+      # mode; uncomment (and mount it) to actually train.
+      # SD_SCRIPTS_DIR: /opt/sd-scripts
+    volumes:
+      # The curator export dir forge reads, and writes <export>/forge/ into.
+      # Must be the same data the UI names in its request paths.
+      - ${FORGE_OUTPUT_PATH:-./out}:/data/out
+    restart: unless-stopped

@@ -230,3 +230,56 @@ def test_unknown_run_is_404(client: TestClient) -> None:
     assert client.get("/run/nope").status_code == 404
     assert client.get("/run/nope/stream").status_code == 404
     assert client.post("/run/nope/cancel").status_code == 404
+
+
+# --- demo-safe mode (#16): render configs, never train ---
+
+
+@pytest.fixture
+def readonly_client() -> Iterator[TestClient]:
+    with TestClient(create_app(cors=True, allow_run=False)) as c:
+        yield c
+
+
+def test_readonly_health_advertises_disabled_training(readonly_client: TestClient) -> None:
+    """The frontend disables its train button from /health, not from a 403."""
+    assert readonly_client.get("/health").json()["training"] == "disabled"
+
+
+def test_health_advertises_enabled_training_by_default(client: TestClient) -> None:
+    assert client.get("/health").json()["training"] == "enabled"
+
+
+def test_readonly_refuses_run(readonly_client: TestClient, tmp_path: Path) -> None:
+    """A run that would otherwise succeed is refused — the gate is the mode,
+    not the request."""
+    export = forge_stub(tmp_path, "kohya", "echo hi\n")
+    resp = readonly_client.post("/run", json={"export_dir": str(export), "trainer": "kohya"})
+    assert resp.status_code == 403
+    assert "training is disabled" in resp.json()["detail"]
+    # Nothing was started.
+    assert readonly_client.get("/runs").json() == []
+
+
+def test_readonly_refuses_run_before_validating(readonly_client: TestClient, tmp_path: Path) -> None:
+    """An invalid request gets the same 403, not a 400 implying it could work."""
+    export = tmp_path / "exp"
+    export.mkdir()
+    resp = readonly_client.post("/run", json={"export_dir": str(export), "trainer": "kohya"})
+    assert resp.status_code == 403
+
+
+def test_readonly_still_renders_configs(readonly_client: TestClient, export_factory: ExportFactory) -> None:
+    """The demoable half of forge is untouched."""
+    export = export_factory(n=10)
+    resp = readonly_client.post(
+        "/config",
+        json={"export_dir": str(export), "trainer": "kohya", "dry_run": True},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["files"]
+
+
+def test_readonly_inspect_still_works(readonly_client: TestClient, export_factory: ExportFactory) -> None:
+    export = export_factory(n=27, captions=4)
+    assert readonly_client.post("/inspect", json={"export_dir": str(export)}).json()["image_count"] == 27

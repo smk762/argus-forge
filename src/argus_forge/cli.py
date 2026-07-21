@@ -294,6 +294,12 @@ def serve(
     port: int = Option(8103, "--port", "-p", help="Port to listen on"),
     host: str = Option("0.0.0.0", "--host", help="Host to bind to"),
     cors: bool = Option(False, "--cors", help="Enable CORS (allow all origins)"),
+    no_run: bool = Option(
+        False,
+        "--no-run",
+        envvar="ARGUS_FORGE_READONLY",
+        help="Demo-safe mode: serve /config but refuse POST /run (403). For hosts with no GPU/trainer.",
+    ),
 ) -> None:
     """Start the argus-forge micro-server (FastAPI) on :8103."""
     try:
@@ -318,7 +324,9 @@ def serve(
             "will fail with 'Failed to fetch'; pass --cors to allow them.",
             err=True,
         )
-    application = create_app(cors=cors)
+    if no_run:
+        typer.echo("Demo-safe mode: POST /run is disabled; /config still renders configs.", err=True)
+    application = create_app(cors=cors, allow_run=not no_run)
     uvicorn.run(application, host=host, port=port)
 
 

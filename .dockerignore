@@ -1,0 +1,17 @@
+# Keep the build context small and hermetic. VCS metadata is intentionally
+# excluded — the Dockerfile passes the version in via SETUPTOOLS_SCM_PRETEND_VERSION
+# (the VERSION build-arg), so hatch-vcs never needs to read git history.
+.git
+.venv
+venv
+.pytest_cache
+.ruff_cache
+.mypy_cache
+__pycache__
+*.pyc
+.env
+dist
+build
+*.egg-info
+node_modules
+.claude

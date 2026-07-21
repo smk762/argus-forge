@@ -79,8 +79,6 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # hatch-vcs reads the tag from git history
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -95,11 +93,15 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest
+      # The base image has no git, so pass the version in via build-arg
+      # (SETUPTOOLS_SCM_PRETEND_VERSION) rather than relying on .git history.
       - uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           push: true
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

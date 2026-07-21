@@ -2,7 +2,7 @@
 
 Routes:
 
-    GET  /health           -> {status, service, version}
+    GET  /health           -> {status, service, version, training}
     GET  /trainers         -> list[TrainerInfo]
     POST /inspect          -> DatasetInfo    (read-only look at an export dir)
     POST /config           -> ForgeResult    (render configs; dry_run for preview)
@@ -18,6 +18,13 @@ container paths like /data/out/...). ``POST /run`` shells out to a script forge
 generated (see :mod:`argus_forge.runner`) on a background job that outlives the
 request (see :mod:`argus_forge.jobs`): it returns the run's id immediately, and
 progress is watched (and re-watched) via ``GET /run/{id}/stream``.
+
+Because a run is real code execution on the host (see the trust note in
+:mod:`argus_forge.runner`), a host that should render configs but never train —
+a public demo, a GPU-less box — starts the app with ``allow_run=False``. Config
+generation stays fully available; ``POST /run`` refuses with 403. The mode is
+advertised on ``GET /health`` as ``training``, so a frontend can disable its
+train button rather than discovering the 403 by clicking it.
 """
 
 from __future__ import annotations
@@ -68,8 +75,17 @@ def _stream(job: Job) -> NDJSONResponse:
     return NDJSONResponse(_ndjson(job.subscribe()), headers={"X-Training-Run-Id": job.run_id})
 
 
-def create_app(cors: bool = False, cors_origins: list[str] | None = None) -> FastAPI:
-    """Create the forge FastAPI application."""
+def create_app(
+    cors: bool = False,
+    cors_origins: list[str] | None = None,
+    allow_run: bool = True,
+) -> FastAPI:
+    """Create the forge FastAPI application.
+
+    With ``allow_run=False`` (demo-safe mode) the app renders configs but never
+    trains: ``POST /run`` is 403 and ``GET /health`` reports ``training:
+    disabled``.
+    """
     registry = JobRegistry()
 
     @asynccontextmanager
@@ -104,7 +120,14 @@ def create_app(cors: bool = False, cors_origins: list[str] | None = None) -> Fas
 
     @app.get("/health")
     async def health() -> dict[str, str]:
-        return {"status": "ok", "service": "argus-forge", "version": __version__}
+        return {
+            "status": "ok",
+            "service": "argus-forge",
+            "version": __version__,
+            # Lets a client disable its train affordance up front instead of
+            # learning about demo-safe mode from a 403.
+            "training": "enabled" if allow_run else "disabled",
+        }
 
     @app.get("/trainers", response_model=list[TrainerInfo])
     async def trainers() -> list[TrainerInfo]:
@@ -127,8 +150,18 @@ def create_app(cors: bool = False, cors_origins: list[str] | None = None) -> Fas
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"forge failed: {exc}") from exc
 
-    @app.post("/run", response_model=RunState, status_code=202)
+    TRAINING_DISABLED = {403: {"description": "training is disabled on this host"}}
+
+    @app.post("/run", response_model=RunState, status_code=202, responses=TRAINING_DISABLED)
     async def run(req: RunRequest) -> RunState:
+        # Refuse before validating: on a demo-safe host the answer is the same
+        # for a well-formed request as a broken one, and a 400 would imply the
+        # request could have worked.
+        if not allow_run:
+            raise HTTPException(
+                status_code=403,
+                detail="training is disabled on this host — POST /config still renders configs to run elsewhere",
+            )
         # Validate (off the event loop) up front so a missing/invalid config is a
         # 400. The run then executes on a background job that outlives this
         # request; the caller gets its id back and watches via GET /run/{id}/stream.

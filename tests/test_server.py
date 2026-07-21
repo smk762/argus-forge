@@ -28,11 +28,15 @@ def _wait_terminal(client: TestClient, run_id: str, timeout: float = 15.0) -> di
 
 
 @pytest.fixture
-def client() -> Iterator[TestClient]:
+def client(tmp_path: Path) -> Iterator[TestClient]:
     # Context-manager form: one persistent event loop across requests (so a
     # background run job and a later cancel/status request share it) + lifespan
     # startup/shutdown (the shutdown hook cancels any run still in flight).
-    with TestClient(create_app(cors=True)) as c:
+    #
+    # Rooted at tmp_path, where export_factory and forge_stub both build, so the
+    # containment fence is on for every test rather than something only the
+    # containment tests see.
+    with TestClient(create_app(cors=True, export_root=str(tmp_path))) as c:
         yield c
 
 
@@ -56,8 +60,16 @@ def test_inspect(client: TestClient, export_factory: ExportFactory) -> None:
     assert body["size_hint"]["tone"] == "good"
 
 
-def test_inspect_bad_dir(client: TestClient) -> None:
+def test_inspect_outside_the_root_is_refused(client: TestClient) -> None:
+    """Containment is checked before existence — an outside path is refused for
+    being outside, never probed to see whether it happens to exist."""
     resp = client.post("/inspect", json={"export_dir": "/nope/missing"})
+    assert resp.status_code == 400
+    assert "escapes the export root" in resp.json()["detail"]
+
+
+def test_inspect_missing_dir_inside_the_root(client: TestClient) -> None:
+    resp = client.post("/inspect", json={"export_dir": "no-such-export"})
     assert resp.status_code == 400
     assert "not a directory" in resp.json()["detail"]
 
@@ -236,8 +248,8 @@ def test_unknown_run_is_404(client: TestClient) -> None:
 
 
 @pytest.fixture
-def readonly_client() -> Iterator[TestClient]:
-    with TestClient(create_app(cors=True, allow_run=False)) as c:
+def readonly_client(tmp_path: Path) -> Iterator[TestClient]:
+    with TestClient(create_app(cors=True, export_root=str(tmp_path), allow_run=False)) as c:
         yield c
 
 
@@ -283,3 +295,150 @@ def test_readonly_still_renders_configs(readonly_client: TestClient, export_fact
 def test_readonly_inspect_still_works(readonly_client: TestClient, export_factory: ExportFactory) -> None:
     export = export_factory(n=27, captions=4)
     assert readonly_client.post("/inspect", json={"export_dir": str(export)}).json()["image_count"] == 27
+
+
+# --- containment: a request's export_dir is untrusted ---
+
+
+def test_traversal_escape_is_refused(client: TestClient) -> None:
+    resp = client.post("/inspect", json={"export_dir": "../../etc"})
+    assert resp.status_code == 400
+    assert "escapes the export root" in resp.json()["detail"]
+
+
+def test_absolute_path_outside_the_root_is_refused(client: TestClient, tmp_path: Path) -> None:
+    """A sibling of the root is not under it, however similar the prefix."""
+    outside = tmp_path.parent / f"{tmp_path.name}-evil"
+    outside.mkdir(exist_ok=True)
+    resp = client.post("/inspect", json={"export_dir": str(outside)})
+    assert resp.status_code == 400
+    assert "escapes the export root" in resp.json()["detail"]
+
+
+def test_absolute_path_inside_the_root_is_allowed(client: TestClient, export_factory: ExportFactory) -> None:
+    """The studio UI echoes back the absolute export_dir forge reported, so an
+    in-root absolute path has to keep working."""
+    export = export_factory(n=5)
+    assert client.post("/inspect", json={"export_dir": str(export)}).status_code == 200
+
+
+def test_relative_path_resolves_under_the_root(client: TestClient, export_factory: ExportFactory) -> None:
+    export = export_factory(n=5)
+    resp = client.post("/inspect", json={"export_dir": export.name})
+    assert resp.status_code == 200
+    assert resp.json()["image_count"] == 5
+
+
+def test_config_outside_the_root_writes_nothing(client: TestClient, tmp_path: Path) -> None:
+    """The point of the fence: /config must not forge a tree into a directory
+    the operator never offered."""
+    outside = tmp_path.parent / f"{tmp_path.name}-target"
+    outside.mkdir(exist_ok=True)
+    resp = client.post("/config", json={"export_dir": str(outside), "trainer": "kohya"})
+    assert resp.status_code == 400
+    assert not (outside / "forge").exists()
+
+
+def test_run_outside_the_root_is_refused(client: TestClient, tmp_path: Path) -> None:
+    outside = forge_stub(tmp_path.parent / f"{tmp_path.name}-run", "kohya", "echo hi\n")
+    resp = client.post("/run", json={"export_dir": str(outside), "trainer": "kohya"})
+    assert resp.status_code == 400
+    assert "escapes the export root" in resp.json()["detail"]
+
+
+def test_malformed_path_is_400_not_500(client: TestClient) -> None:
+    """An embedded NUL raises out of resolve(); it must not surface as a 500."""
+    resp = client.post("/inspect", json={"export_dir": "a\x00b"})
+    assert resp.status_code == 400
+
+
+def test_no_export_root_refuses_everything() -> None:
+    """Unconfigured means closed, not wide open."""
+    with TestClient(create_app(cors=True)) as c:
+        for path, body in (
+            ("/inspect", {"export_dir": "/tmp"}),
+            ("/config", {"export_dir": "/tmp", "trainer": "kohya"}),
+            ("/run", {"export_dir": "/tmp", "trainer": "kohya"}),
+        ):
+            resp = c.post(path, json=body)
+            assert resp.status_code == 400, path
+            assert "no export root configured" in resp.json()["detail"]
+        assert c.get("/health").json()["export_root"] is None
+
+
+def test_health_reports_the_export_root(client: TestClient, tmp_path: Path) -> None:
+    assert client.get("/health").json()["export_root"] == str(tmp_path.resolve())
+
+
+# --- CORS is an allow-list, and not a write boundary ---
+
+
+def test_cors_default_is_the_localhost_frontend_not_a_wildcard(client: TestClient) -> None:
+    """A bare --cors must not reflect any origin back with credentials."""
+    resp = client.get("/health", headers={"Origin": "http://evil.example"})
+    assert "access-control-allow-origin" not in resp.headers
+
+    allowed = client.get("/health", headers={"Origin": "http://localhost:3000"})
+    assert allowed.headers["access-control-allow-origin"] == "http://localhost:3000"
+    assert allowed.headers.get("access-control-allow-credentials") == "true"
+
+
+def test_named_origin_is_allowed_and_may_write(tmp_path: Path) -> None:
+    with TestClient(create_app(cors_origins=["http://studio.local"], export_root=str(tmp_path))) as c:
+        resp = c.post(
+            "/inspect",
+            json={"export_dir": "nope"},
+            headers={"Origin": "http://studio.local"},
+        )
+        # Reached the handler (400 for the missing dir), not refused by the guard.
+        assert resp.status_code == 400
+        assert "not a directory" in resp.json()["detail"]
+
+
+def test_wildcard_is_credential_less(tmp_path: Path) -> None:
+    """--cors-any grants anonymous reads from anywhere, never credentialed ones."""
+    with TestClient(create_app(cors_allow_any=True, export_root=str(tmp_path))) as c:
+        resp = c.get("/health", headers={"Origin": "http://evil.example"})
+        assert resp.headers["access-control-allow-origin"] == "*"
+        assert "access-control-allow-credentials" not in resp.headers
+
+
+def test_literal_star_in_the_allow_list_takes_the_wildcard_path(tmp_path: Path) -> None:
+    """A literal "*" means --cors-any, not credentialed origin reflection."""
+    with TestClient(create_app(cors_origins=["*"], export_root=str(tmp_path))) as c:
+        resp = c.get("/health", headers={"Origin": "http://evil.example"})
+        assert resp.headers["access-control-allow-origin"] == "*"
+        assert "access-control-allow-credentials" not in resp.headers
+
+
+def test_cross_site_write_is_refused(client: TestClient, export_factory: ExportFactory) -> None:
+    """CORS is not a write boundary: a page the user visits can POST here with
+    no preflight, so unsafe methods are gated on Origin itself."""
+    export = export_factory(n=5)
+    resp = client.post(
+        "/config",
+        json={"export_dir": str(export), "trainer": "kohya"},
+        headers={"Origin": "http://evil.example"},
+    )
+    assert resp.status_code == 403
+    assert "cross-site POST" in resp.json()["detail"]
+    assert not (export / "forge").exists()
+
+
+def test_wildcard_still_refuses_cross_site_writes(tmp_path: Path, export_factory: ExportFactory) -> None:
+    """A public demo must not double as a way to make this host forge configs."""
+    export = export_factory(n=5)
+    with TestClient(create_app(cors_allow_any=True, export_root=str(tmp_path))) as c:
+        resp = c.post(
+            "/config",
+            json={"export_dir": str(export), "trainer": "kohya"},
+            headers={"Origin": "http://evil.example"},
+        )
+        assert resp.status_code == 403
+
+
+def test_non_browser_clients_still_write(client: TestClient, export_factory: ExportFactory) -> None:
+    """curl and the studio server-side never send Origin; they must not be gated."""
+    export = export_factory(n=5)
+    resp = client.post("/config", json={"export_dir": str(export), "trainer": "kohya", "dry_run": True})
+    assert resp.status_code == 200

@@ -10,10 +10,16 @@ services:
     ports:
       - "${FORGE_PORT:-8103}:8103"
     environment:
+      # Containment root for request-supplied export_dir paths. Required — the
+      # API refuses every /inspect, /config and /run without it.
+      ARGUS_FORGE_EXPORT_ROOT: /data/out
       # Demo-safe mode: serve /config, refuse POST /run with 403. Set to 1 on
       # any host without a GPU + sd-scripts, and on any publicly reachable one
       # — a run is real code execution on the host (see runner.py's trust note).
       ARGUS_FORGE_READONLY: ${ARGUS_FORGE_READONLY:-0}
+      # Browser origins allowed to call the API (comma-separated). Defaults to
+      # the localhost:3000 studio frontend when --cors is passed.
+      # FORGE_CORS_ORIGINS: https://studio.example.com
       # Rewrite manifest source paths into container paths in emitted configs,
       # e.g. FORGE_PATH_MAP=/home/me/pics=/data/images. Empty = no rewriting.
       FORGE_PATH_MAP: ${FORGE_PATH_MAP:-}

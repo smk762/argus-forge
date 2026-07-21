@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -293,7 +294,18 @@ def schema(
 def serve(
     port: int = Option(8103, "--port", "-p", help="Port to listen on"),
     host: str = Option("0.0.0.0", "--host", help="Host to bind to"),
-    cors: bool = Option(False, "--cors", help="Enable CORS (allow all origins)"),
+    cors: bool = Option(False, "--cors", help="Enable CORS for the localhost:3000 studio frontend"),
+    cors_origin: list[str] = Option(
+        [], "--cors-origin", help="Allowed CORS origin (repeatable; implies CORS; or FORGE_CORS_ORIGINS)"
+    ),
+    cors_any: bool = Option(
+        False, "--cors-any", help="Allow ANY origin, credential-less and read-only (public demos only; implies CORS)"
+    ),
+    export_root: str | None = Option(
+        None,
+        "--export-root",
+        help="Contain request export_dir paths under this directory (or ARGUS_FORGE_EXPORT_ROOT); required by the API",
+    ),
     no_run: bool = Option(
         False,
         "--no-run",
@@ -318,7 +330,7 @@ def serve(
     except ForgeError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from exc
-    if not cors:
+    if not (cors or cors_origin or cors_any):
         typer.echo(
             "CORS is disabled — browser clients (e.g. the argus-studio frontend on :3000) "
             "will fail with 'Failed to fetch'; pass --cors to allow them.",
@@ -326,7 +338,19 @@ def serve(
         )
     if no_run:
         typer.echo("Demo-safe mode: POST /run is disabled; /config still renders configs.", err=True)
-    application = create_app(cors=cors, allow_run=not no_run)
+    if not (export_root or os.environ.get("ARGUS_FORGE_EXPORT_ROOT") or os.environ.get("FORGE_EXPORT_PATH")):
+        typer.echo(
+            "No export root — /inspect, /config and /run will refuse every request with a 400. "
+            "Pass --export-root (or set ARGUS_FORGE_EXPORT_ROOT) to the dir holding curator exports.",
+            err=True,
+        )
+    application = create_app(
+        cors=cors,
+        cors_origins=cors_origin or None,
+        cors_allow_any=cors_any,
+        export_root=export_root,
+        allow_run=not no_run,
+    )
     uvicorn.run(application, host=host, port=port)
 
 

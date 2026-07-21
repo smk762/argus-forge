@@ -47,7 +47,8 @@ uv pip install "argus-forge[cli,server]"   # + HTTP server for argus-studio
 Or run the published image (serves `:8103` with `--cors`):
 
 ```bash
-docker run --rm -p 8103:8103 -v /path/to/out:/data/out ghcr.io/smk762/argus-forge:latest
+docker run --rm -p 8103:8103 -v /path/to/out:/data/out \
+  -e ARGUS_FORGE_EXPORT_ROOT=/data/out ghcr.io/smk762/argus-forge:latest
 docker compose up          # local build; see docker-compose.yaml for the knobs
 ```
 
@@ -73,16 +74,32 @@ command without executing, and `--json` streams raw NDJSON `RunEvent`s.
 Start the FastAPI micro-server on **:8103** (peer to lens :8100, curator :8101, quarry :8102):
 
 ```bash
-argus-forge serve --cors
+argus-forge serve --cors --export-root /data/out
 ```
+
+`--export-root` is **required** by the API: a request's `export_dir` is untrusted, so it resolves under this
+directory (refusing traversal escapes) and every `/inspect`, `/config` and `/run` refuses with 400 until it
+is set. Without the fence, `POST /config` would forge a tree into any directory the caller names. Also
+settable as `ARGUS_FORGE_EXPORT_ROOT` (or `FORGE_EXPORT_PATH` for compose). The **CLI is unconstrained** by
+design — it is your own shell, not a request.
 
 `--cors` matters: the studio frontend calls forge **cross-origin** (browser on :3000 → forge on :8103), and
 CORS is opt-in — without it the ExportPanel fails with "Failed to fetch" even though `curl` works fine.
 (The Docker image passes `--cors` already; this applies to the pip-installed path.)
 
+A bare `--cors` allows the localhost:3000 dev frontend. Name other origins with `--cors-origin`
+(repeatable, or `FORGE_CORS_ORIGINS=a,b`). `--cors-any` allows *any* origin **credential-less** — anonymous
+reads from anywhere, for a public demo — and never a cross-site write. A literal `*` in the allow-list takes
+that same path rather than becoming credentialed origin reflection.
+
+> CORS is not a write boundary. A cross-origin POST with a CORS-safelisted content type is sent with **no
+> preflight**, so any page your browser visits can drive an unauthenticated LAN server; the same-origin
+> policy only stops it from *reading* the reply. So unsafe methods are additionally gated on `Origin`:
+> absent (curl, the CLI, server-to-server) or same host:port or allow-listed → through; anything else → 403.
+
 | Route | Purpose |
 | ----- | ------- |
-| `GET /health` | liveness + version + whether training is enabled |
+| `GET /health` | liveness + version + export root + whether training is enabled |
 | `GET /trainers` | supported trainers + emitted files |
 | `POST /inspect` | look at an export dir (counts, manifest, suggested params) |
 | `POST /config` | render configs; `dry_run: true` returns contents without writing |

@@ -44,13 +44,15 @@ uv pip install "argus-forge[cli]"          # CLI
 uv pip install "argus-forge[cli,server]"   # + HTTP server for argus-studio
 ```
 
-Or run the published image (serves `:8103` with `--cors`):
+Or run the published image (serves `:8103` with `--cors`, and defaults its export root to `/data/out`):
 
 ```bash
-docker run --rm -p 8103:8103 -v /path/to/out:/data/out \
-  -e ARGUS_FORGE_EXPORT_ROOT=/data/out ghcr.io/smk762/argus-forge:latest
-docker compose up          # local build; see docker-compose.yaml for the knobs
+docker run --rm -p 8103:8103 -v /path/to/out:/data/out ghcr.io/smk762/argus-forge:latest
+docker compose up          # local build; see docker-compose.yaml (and .env.example) for the knobs
 ```
+
+The image contains no trainer, so `docker compose up` starts in [demo-safe mode](#demo-safe-mode-no-training)
+— configs render, training is refused. Set `ARGUS_FORGE_READONLY=0` once you have mounted one.
 
 ## CLI
 
@@ -77,20 +79,37 @@ Start the FastAPI micro-server on **:8103** (peer to lens :8100, curator :8101, 
 argus-forge serve --cors --export-root /data/out
 ```
 
-`--export-root` is **required** by the API: a request's `export_dir` is untrusted, so it resolves under this
-directory (refusing traversal escapes) and every `/inspect`, `/config` and `/run` refuses with 400 until it
-is set. Without the fence, `POST /config` would forge a tree into any directory the caller names. Also
-settable as `ARGUS_FORGE_EXPORT_ROOT` (or `FORGE_EXPORT_PATH` for compose). The **CLI is unconstrained** by
-design — it is your own shell, not a request.
+`--export-root` is **required** by the API: a request's `export_dir` is untrusted, so it must name a
+directory *under* this one, and every `/inspect`, `/config` and `/run` refuses with 400 until it is set.
+Without the fence, `POST /config` would forge a tree into any directory the caller names. Also settable as
+`ARGUS_FORGE_EXPORT_ROOT` (`FORGE_EXPORT_PATH` is a legacy alias); the published image defaults it to
+`/data/out`. The **CLI is unconstrained** by design — it is your own shell, not a request.
+
+Containment is decided on the fully resolved path, so a symlink pointing out of the root is refused rather
+than followed, and the root itself is not a valid `export_dir` (a blank field would otherwise mean "treat
+the whole shared volume as one dataset"). The path handed to the emitters keeps *your* spelling, though —
+`path_map` prefixes are matched against it, so a symlinked root like `/data/out -> /mnt/big/out` still
+rewrites correctly. The manifest's `abs_path` caption sources are fenced to the same root: forge will not
+copy a sidecar from outside it into your dataset.
 
 `--cors` matters: the studio frontend calls forge **cross-origin** (browser on :3000 → forge on :8103), and
 CORS is opt-in — without it the ExportPanel fails with "Failed to fetch" even though `curl` works fine.
 (The Docker image passes `--cors` already; this applies to the pip-installed path.)
 
 A bare `--cors` allows the localhost:3000 dev frontend. Name other origins with `--cors-origin`
-(repeatable, or `FORGE_CORS_ORIGINS=a,b`). `--cors-any` allows *any* origin **credential-less** — anonymous
-reads from anywhere, for a public demo — and never a cross-site write. A literal `*` in the allow-list takes
-that same path rather than becoming credentialed origin reflection.
+(repeatable, or `FORGE_CORS_ORIGINS=a,b`); they are **added to** the localhost defaults, not swapped for
+them. Entries are compared to the `Origin` header a browser actually sends, so a trailing slash or stray
+whitespace is normalised away rather than silently never matching.
+
+`--cors-any` allows *any* origin **credential-less** — anonymous reads from anywhere, for a public demo. A
+literal `*` in the allow-list takes that same path rather than becoming credentialed origin reflection.
+It never grants a cross-site *write* to an origin you did not name — but origins you **did** name keep
+theirs. That pairing is what a public demo needs, because every endpoint that does anything in forge
+(`/inspect`, `/config`) is a POST:
+
+```bash
+argus-forge serve --cors-any --cors-origin https://demo.example --no-run --export-root /data/out
+```
 
 > CORS is not a write boundary. A cross-origin POST with a CORS-safelisted content type is sent with **no
 > preflight**, so any page your browser visits can drive an unauthenticated LAN server; the same-origin
@@ -130,9 +149,19 @@ So a host that should render configs but never train — a public demo, a box wi
 argus-forge serve --cors --no-run       # or: ARGUS_FORGE_READONLY=1 argus-forge serve --cors
 ```
 
-`/inspect` and `/config` (including `dry_run`) are untouched; `POST /run` refuses with **403** and a message
-saying training is disabled on this host. `GET /health` reports `"training": "enabled" | "disabled"`, so a
-frontend can disable its train button up front rather than discovering the refusal by clicking it.
+`/inspect` and `/config` keep working; every `/run` route refuses with **403** and a message saying training
+is disabled on this host. The refusal is middleware, so it lands *before* the request body is validated —
+on such a host a malformed request deserves the same answer as a well-formed one — and it covers `/run`
+routes added later without a per-route guard to forget.
+
+Demo-safe also means **write**-safe: `POST /config` is forced to `dry_run`, so it renders and returns the
+files but never touches the volume. Forge has no authentication, so on a publicly reachable host an
+ordinary `curl` would otherwise overwrite the curator's `metadata.jsonl` and leave an executable `train.sh`
+behind on shared storage.
+
+`GET /health` reports `"training": "enabled" | "disabled"`, so a frontend can disable its train button up
+front rather than discovering the refusal by clicking it. The compose file turns this mode **on by
+default** — the image ships no trainer, so a run there could only ever fail.
 
 ### Container ↔ host paths (`path_map`)
 

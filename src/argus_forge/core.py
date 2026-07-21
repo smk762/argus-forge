@@ -95,13 +95,23 @@ def resolve_path_map(req_map: dict[str, str]) -> dict[str, str]:
     return merged
 
 
+def _within(root: Path, path: Path) -> bool:
+    """Whether *path* is *root* or lies under it, symlinks resolved."""
+    try:
+        probe = path.resolve()
+    except (ValueError, OSError, RuntimeError):
+        return False
+    return probe == root or root in probe.parents
+
+
 def collect_captions(
     export_dir: Path,
     rows: list[ManifestRow],
     dry_run: bool,
     resolved: list[Path | None] | None = None,
     skip: set[Path] | None = None,
-) -> int:
+    source_root: Path | None = None,
+) -> tuple[int, int]:
     """Copy ``.txt`` sidecars written next to the *source* images into the export.
 
     argus-lens captions the manifest's ``abs_path`` entries, so sidecars land
@@ -111,15 +121,28 @@ def collect_captions(
     are left uncaptioned rather than paired with a caption that may describe
     different pixels. *resolved* is :func:`resolve_rows` output, passable to
     avoid re-stat()ing every row.
+
+    ``abs_path`` is manifest-supplied, so on a server it is exactly as untrusted
+    as the request that named the export dir: *source_root* fences it, and a
+    sidecar outside that root is refused rather than copied into the shared
+    volume (and, for trainers that inline captions, echoed back to the caller).
+    None means unconstrained — the CLI, which is the operator's own shell.
+
+    Returns ``(copied, refused)``.
     """
     if resolved is None:
         resolved = resolve_rows(export_dir, rows)
+    root = source_root.resolve() if source_root else None
     copied = 0
+    refused = 0
     for row, dest_img in zip(rows, resolved, strict=True):
         if dest_img is None or (skip and dest_img in skip):
             continue
         src_caption = caption_path(Path(row.abs_path))
         if not src_caption.is_file():
+            continue
+        if root is not None and not _within(root, src_caption):
+            refused += 1
             continue
         dest_caption = caption_path(dest_img)
         if dest_caption.exists():
@@ -127,7 +150,7 @@ def collect_captions(
         if not dry_run:
             shutil.copy2(src_caption, dest_caption)
         copied += 1
-    return copied
+    return copied, refused
 
 
 def forge_config(req: ForgeRequest) -> ForgeResult:
@@ -168,11 +191,21 @@ def forge_config(req: ForgeRequest) -> ForgeResult:
 
     captions_collected = 0
     if req.collect_captions and rows:
-        captions_collected = collect_captions(
-            export_dir, rows, dry_run=req.dry_run, resolved=resolved, skip=set(collisions)
+        captions_collected, captions_refused = collect_captions(
+            export_dir,
+            rows,
+            dry_run=req.dry_run,
+            resolved=resolved,
+            skip=set(collisions),
+            source_root=Path(req.caption_source_root) if req.caption_source_root else None,
         )
         if captions_collected and req.dry_run:
             warnings.append(f"dry run: {captions_collected} caption sidecars would be collected from sources")
+        if captions_refused:
+            warnings.append(
+                f"{captions_refused} caption sidecar(s) skipped: the manifest's abs_path points outside "
+                "the export root, and forge will not copy files from outside it into the dataset"
+            )
 
     # Collection only adds sidecars next to already-counted images, so refresh
     # the caption count in place rather than re-parsing the manifest and

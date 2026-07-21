@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -10,6 +11,7 @@ from conftest import ExportFactory, forge_stub
 from fastapi.testclient import TestClient
 
 from argus_forge.manifest import resolve_export_dir
+from argus_forge.models import CORS_ORIGINS_ENV, READONLY_ENV
 from argus_forge.server import create_app
 
 
@@ -137,11 +139,15 @@ def test_run_unrunnable_trainer_is_400(client: TestClient, tmp_path: Path) -> No
     assert "no launcher" in resp.json()["detail"]
 
 
-def test_run_blocked_env_is_400(client: TestClient, tmp_path: Path) -> None:
+@pytest.mark.parametrize("key", ["LD_PRELOAD", "BASH_ENV", "ENV", "LD_AUDIT", "PATH"])
+def test_run_blocked_env_is_400(client: TestClient, tmp_path: Path, key: str) -> None:
+    """Every key that redirects *what* runs, not just where. PATH belongs here:
+    the command is the bare name "bash", so a caller-supplied PATH pointing at a
+    directory holding its own ./bash replaces the forged script entirely."""
     export = forge_stub(tmp_path, "kohya", "echo hi\n")
-    resp = client.post("/run", json={"export_dir": str(export), "trainer": "kohya", "env": {"LD_PRELOAD": "/x.so"}})
+    resp = client.post("/run", json={"export_dir": str(export), "trainer": "kohya", "env": {key: "/x"}})
     assert resp.status_code == 400
-    assert "LD_PRELOAD" in resp.json()["detail"]
+    assert key in resp.json()["detail"]
 
 
 # --- job registry (#13): runs outlive the connection ---
@@ -227,13 +233,19 @@ def test_run_state_export_dir_is_resolved(client: TestClient, tmp_path: Path) ->
 
 
 def test_cors_exposes_the_run_id_header(client: TestClient, tmp_path: Path) -> None:
-    """Cross-origin JS can only read X-Training-Run-Id if it's explicitly exposed."""
+    """Cross-origin JS can only read X-Training-Run-Id if it's explicitly exposed.
+
+    The origin must be one the write guard trusts: from an untrusted origin the
+    POST is refused before the handler runs, and asserting on the refusal's
+    headers would prove nothing about the success path.
+    """
     export = forge_stub(tmp_path, "kohya", "echo hi\n")
     resp = client.post(
         "/run",
         json={"export_dir": str(export), "trainer": "kohya"},
-        headers={"Origin": "http://ui.local"},
+        headers={"Origin": "http://localhost:3000"},
     )
+    assert resp.status_code == 202
     exposed = resp.headers.get("access-control-expose-headers", "").lower()
     assert "x-training-run-id" in exposed
 
@@ -273,12 +285,28 @@ def test_readonly_refuses_run(readonly_client: TestClient, tmp_path: Path) -> No
     assert readonly_client.get("/runs").json() == []
 
 
-def test_readonly_refuses_run_before_validating(readonly_client: TestClient, tmp_path: Path) -> None:
-    """An invalid request gets the same 403, not a 400 implying it could work."""
-    export = tmp_path / "exp"
-    export.mkdir()
-    resp = readonly_client.post("/run", json={"export_dir": str(export), "trainer": "kohya"})
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param({}, id="empty"),
+        pytest.param({"trainer": "kohya"}, id="no-export-dir"),
+        pytest.param({"export_dir": "x", "trainer": "bogus"}, id="unknown-trainer"),
+    ],
+)
+def test_readonly_refuses_run_before_validating(readonly_client: TestClient, body: dict) -> None:
+    """A schema-invalid request gets the same 403, not a 422 implying it could work.
+
+    The guard is middleware precisely so it lands ahead of FastAPI's body
+    validation; an in-handler check cannot, since the 422 is raised first.
+    """
+    assert readonly_client.post("/run", json=body).status_code == 403
+
+
+def test_readonly_refuses_run_cancel(readonly_client: TestClient) -> None:
+    """The fence is path-based, so every /run route is covered — not just POST /run."""
+    resp = readonly_client.post("/run/anything/cancel")
     assert resp.status_code == 403
+    assert "training is disabled" in resp.json()["detail"]
 
 
 def test_readonly_still_renders_configs(readonly_client: TestClient, export_factory: ExportFactory) -> None:
@@ -290,6 +318,43 @@ def test_readonly_still_renders_configs(readonly_client: TestClient, export_fact
     )
     assert resp.status_code == 200
     assert resp.json()["files"]
+
+
+def test_readonly_config_is_forced_to_dry_run(readonly_client: TestClient, export_factory: ExportFactory) -> None:
+    """A demo host is unauthenticated by assumption, so /config never writes.
+
+    Without this, an anonymous curl overwrites the curator's metadata.jsonl and
+    plants an executable train.sh on the shared volume.
+    """
+    export = export_factory(n=10)
+    resp = readonly_client.post("/config", json={"export_dir": str(export), "trainer": "kohya"})
+    assert resp.status_code == 200
+    assert resp.json()["files"]  # still rendered...
+    assert not (export / "forge").exists()  # ...but nothing on disk
+    assert all(f["path"] is None for f in resp.json()["files"])
+
+
+def test_readonly_mode_comes_from_the_env(tmp_path: Path) -> None:
+    """create_app honours ARGUS_FORGE_READONLY itself, so any ASGI entry point
+    (uvicorn --factory, an embedding) gets the same fence as `serve`."""
+    os.environ[READONLY_ENV] = "1"
+    try:
+        with TestClient(create_app(export_root=str(tmp_path))) as c:
+            assert c.get("/health").json()["training"] == "disabled"
+            assert c.post("/run", json={}).status_code == 403
+    finally:
+        del os.environ[READONLY_ENV]
+
+
+def test_unrecognised_readonly_value_is_off_not_fatal(tmp_path: Path) -> None:
+    """A typo must warn and leave the guard off, not kill the process — the
+    suite contract in argus_cortex.server.env_flag."""
+    os.environ[READONLY_ENV] = "enabled"
+    try:
+        with TestClient(create_app(export_root=str(tmp_path))) as c:
+            assert c.get("/health").json()["training"] == "enabled"
+    finally:
+        del os.environ[READONLY_ENV]
 
 
 def test_readonly_inspect_still_works(readonly_client: TestClient, export_factory: ExportFactory) -> None:
@@ -350,6 +415,90 @@ def test_malformed_path_is_400_not_500(client: TestClient) -> None:
     """An embedded NUL raises out of resolve(); it must not surface as a 500."""
     resp = client.post("/inspect", json={"export_dir": "a\x00b"})
     assert resp.status_code == 400
+
+
+@pytest.mark.parametrize("route", ["/inspect", "/config", "/run"])
+def test_symlink_loop_is_400_not_500(client: TestClient, tmp_path: Path, route: str) -> None:
+    """pathlib raises RuntimeError (NOT OSError) for a symlink loop on every
+    Python this package supports, so catching OSError alone lets it escape as an
+    unhandled 500 — the exact thing the malformed-path guard exists to prevent."""
+    (tmp_path / "loop").symlink_to(tmp_path / "loop")
+    resp = client.post(route, json={"export_dir": "loop", "trainer": "kohya"})
+    assert resp.status_code == 400
+    assert "malformed path" in resp.json()["detail"]
+
+
+def test_health_survives_an_unresolvable_root(tmp_path: Path) -> None:
+    """A liveness probe must not 500 because the export root is misconfigured."""
+    loop = tmp_path / "loop"
+    loop.symlink_to(loop)
+    with TestClient(create_app(export_root=str(loop))) as c:
+        health = c.get("/health")
+        assert health.status_code == 200
+        assert health.json()["export_root"] is None
+        assert c.post("/inspect", json={"export_dir": "x"}).status_code == 400
+
+
+@pytest.mark.parametrize("blank", ["", ".", "./"])
+def test_export_dir_may_not_be_the_export_root(client: TestClient, export_factory: ExportFactory, blank: str) -> None:
+    """A UI that posts before the user picks a directory must not silently be
+    handed the whole shared volume: that merges every sibling export into one
+    dataset and writes a forge/ tree at the root."""
+    export_factory(n=3, name="setA")
+    resp = client.post("/inspect", json={"export_dir": blank})
+    assert resp.status_code == 400
+    assert "not the root itself" in resp.json()["detail"]
+
+
+def test_symlink_out_of_the_root_is_refused(client: TestClient, tmp_path: Path) -> None:
+    """Containment is decided on the resolved path, so a symlink is not a way out."""
+    outside = tmp_path.parent / f"{tmp_path.name}-escape"
+    outside.mkdir(exist_ok=True)
+    (tmp_path / "bridge").symlink_to(outside)
+    resp = client.post("/inspect", json={"export_dir": "bridge"})
+    assert resp.status_code == 400
+    assert "escapes the export root" in resp.json()["detail"]
+
+
+def test_symlinked_root_keeps_the_requested_spelling(tmp_path: Path, export_factory: ExportFactory) -> None:
+    """/data/out -> /mnt/big/out is an ordinary bind/NAS shape. The fence has to
+    resolve it to *check* containment, but must hand downstream the spelling the
+    caller used — path_map prefixes are matched against that, and dereferencing
+    it silently stops every rewrite (README "Container <-> host paths")."""
+    export_factory(n=5, name="myset")
+    link = tmp_path.parent / f"{tmp_path.name}-link"
+    if link.is_symlink():
+        link.unlink()
+    link.symlink_to(tmp_path)
+    with TestClient(create_app(export_root=str(link))) as c:
+        body = c.post("/inspect", json={"export_dir": "myset"}).json()
+        assert body["export_dir"] == str(link / "myset")
+
+
+def test_caption_sources_outside_the_root_are_refused(client: TestClient, tmp_path: Path) -> None:
+    """The manifest's abs_path is as untrusted as the request. Without a fence,
+    any readable .txt on the host is copied into the shared volume and — for
+    trainers that inline captions — echoed straight back in the response."""
+    secret = tmp_path.parent / f"{tmp_path.name}-secret"
+    secret.mkdir(exist_ok=True)
+    (secret / "id_rsa.png").write_bytes(b"x")
+    (secret / "id_rsa.txt").write_text("BEGIN PRIVATE KEY hunter2", encoding="utf-8")
+
+    export = tmp_path / "myset"
+    export.mkdir()
+    (export / "a.png").write_bytes(b"x")
+    row = {
+        "manifest_version": "2.0",
+        "rel_path": "a.png",
+        "abs_path": str(secret / "id_rsa.png"),
+        "exported_path": "a.png",
+    }
+    (export / "manifest.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    body = client.post("/config", json={"export_dir": "myset", "trainer": "diffusers"}).json()
+    assert not (export / "a.txt").exists()
+    assert "hunter2" not in json.dumps(body)
+    assert any("outside the export root" in w for w in body["warnings"])
 
 
 def test_no_export_root_refuses_everything() -> None:
@@ -435,6 +584,67 @@ def test_wildcard_still_refuses_cross_site_writes(tmp_path: Path, export_factory
             headers={"Origin": "http://evil.example"},
         )
         assert resp.status_code == 403
+
+
+def test_wildcard_keeps_named_origins_writable(tmp_path: Path, export_factory: ExportFactory) -> None:
+    """The wildcard grants anonymous reads; it must not silently revoke a write
+    grant the operator gave explicitly. Otherwise a public demo cannot drive its
+    own frontend, since every useful forge endpoint (/inspect, /config) is a POST."""
+    export = export_factory(n=5)
+    with TestClient(
+        create_app(cors_allow_any=True, cors_origins=["https://demo.example"], export_root=str(tmp_path))
+    ) as c:
+        anyone = c.get("/health", headers={"Origin": "http://evil.example"})
+        assert anyone.headers["access-control-allow-origin"] == "*"
+
+        mine = c.post(
+            "/config",
+            json={"export_dir": str(export), "trainer": "kohya", "dry_run": True},
+            headers={"Origin": "https://demo.example"},
+        )
+        assert mine.status_code == 200
+
+        theirs = c.post(
+            "/config",
+            json={"export_dir": str(export), "trainer": "kohya", "dry_run": True},
+            headers={"Origin": "http://evil.example"},
+        )
+        assert theirs.status_code == 403
+
+
+def test_cors_origin_augments_rather_than_replaces_localhost(tmp_path: Path, export_factory: ExportFactory) -> None:
+    """README: "A bare --cors allows the localhost:3000 dev frontend. Name other
+    origins with --cors-origin." Other, not instead of — the shipped image CMD
+    passes --cors, so replacing would kill the studio dev frontend."""
+    export = export_factory(n=5)
+    with TestClient(create_app(cors=True, cors_origins=["https://studio.example"], export_root=str(tmp_path))) as c:
+        for origin in ("http://localhost:3000", "https://studio.example"):
+            assert c.get("/health", headers={"Origin": origin}).headers["access-control-allow-origin"] == origin
+            resp = c.post(
+                "/config",
+                json={"export_dir": str(export), "trainer": "kohya", "dry_run": True},
+                headers={"Origin": origin},
+            )
+            assert resp.status_code == 200, origin
+
+
+@pytest.mark.parametrize("spelling", ["https://studio.example/", " https://studio.example ", "https://studio.example"])
+def test_allow_list_entries_are_normalized(tmp_path: Path, spelling: str) -> None:
+    """A trailing slash or stray whitespace is a common way to write an entry
+    that can never match the Origin header a browser actually sends."""
+    with TestClient(create_app(cors_origins=[spelling], export_root=str(tmp_path))) as c:
+        resp = c.get("/health", headers={"Origin": "https://studio.example"})
+        assert resp.headers.get("access-control-allow-origin") == "https://studio.example"
+
+
+def test_env_origins_are_honoured(tmp_path: Path) -> None:
+    os.environ[CORS_ORIGINS_ENV] = "https://a.example, https://b.example"
+    try:
+        with TestClient(create_app(export_root=str(tmp_path))) as c:
+            for origin in ("https://a.example", "https://b.example"):
+                assert c.get("/health", headers={"Origin": origin}).headers["access-control-allow-origin"] == origin
+    finally:
+        del os.environ[CORS_ORIGINS_ENV]
 
 
 def test_non_browser_clients_still_write(client: TestClient, export_factory: ExportFactory) -> None:

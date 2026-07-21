@@ -92,16 +92,25 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
-      # The base image has no git, so pass the version in via build-arg
-      # (SETUPTOOLS_SCM_PRETEND_VERSION) rather than relying on .git history.
+            # Only a final release moves `latest`. The trigger is `v*`, so
+            # without this guard a `v0.2.0-rc1` tag would silently repoint every
+            # `:latest` user (README quickstart, compose) onto a candidate.
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+      # The base image has no git, so the version is passed in via build-arg
+      # (SETUPTOOLS_SCM_PRETEND_VERSION) rather than read from .git history.
+      # Derived from the tag itself, not from steps.meta.outputs.version: the
+      # `v*` trigger is broader than semver, and for a non-semver tag both
+      # type=semver entries drop out and that output falls back to the literal
+      # string "latest" — which is not a PEP 440 version and fails the build.
+      - id: version
+        run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           push: true
           build-args: |
-            VERSION=${{ steps.meta.outputs.version }}
+            VERSION=${{ steps.version.outputs.value }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

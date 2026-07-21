@@ -39,8 +39,10 @@ RUNNABLE_TRAINERS: tuple[str, ...] = tuple(t for t, info in TRAINER_INFO.items()
 
 # Env vars refused from caller-supplied env: each lets a request redirect what
 # executes before/instead of the forged script — bash sources BASH_ENV/ENV for
-# non-interactive shells, and the dynamic loader honours LD_PRELOAD/LD_AUDIT.
-BLOCKED_ENV_KEYS: frozenset[str] = frozenset({"BASH_ENV", "ENV", "LD_PRELOAD", "LD_AUDIT"})
+# non-interactive shells, the dynamic loader honours LD_PRELOAD/LD_AUDIT, and
+# PATH decides which binary the bare name "bash" below even resolves to (set it
+# to a directory holding an attacker's ./bash and the forged script never runs).
+BLOCKED_ENV_KEYS: frozenset[str] = frozenset({"BASH_ENV", "ENV", "LD_PRELOAD", "LD_AUDIT", "PATH"})
 
 # Bytes read per stdout pull. Reading in chunks (not readline) means no single
 # line can exceed a buffer limit, and carriage-return progress bars stream.

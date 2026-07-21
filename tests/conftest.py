@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from argus_forge.models import MAJORS_REQUIRING_EXPORTED_PATH, manifest_major
+from argus_forge.models import MAJORS_REQUIRING_EXPORTED_PATH, SERVER_ENV_VARS, manifest_major
 
 # A real 1x1 transparent PNG. Forge never decodes images (it only matches
 # extensions), but a valid file keeps fixtures honest.
@@ -19,10 +19,16 @@ ExportFactory = Callable[..., Path]
 
 
 @pytest.fixture(autouse=True)
-def _isolate_path_map_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """forge_config reads FORGE_PATH_MAP; a value exported in the developer's
-    shell (as the README suggests for serve) must not leak into tests."""
-    monkeypatch.delenv("FORGE_PATH_MAP", raising=False)
+def _isolate_server_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear every env var forge_config and create_app read.
+
+    A value exported in the developer's shell (as the README suggests for
+    ``serve``) must not leak into tests — otherwise the containment and CORS
+    tests, which exist to prove the security properties, pass or fail on the
+    ambient environment rather than on the code.
+    """
+    for name in SERVER_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture

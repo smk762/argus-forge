@@ -77,6 +77,18 @@
           "default": null,
           "title": "Base Model"
         },
+        "caption_source_root": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Caption Source Root"
+        },
         "category": {
           "anyOf": [
             {

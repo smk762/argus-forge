@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from conftest import ExportFactory, forge_stub
 from typer.testing import CliRunner
 
 from argus_forge.cli import _run_exit_status, app
+from argus_forge.models import ARGUS_ROOT_ENV, CORS_ORIGINS_ENV, READONLY_ENV
 
 runner = CliRunner()
 
@@ -135,3 +137,82 @@ def test_schema_write_and_check(tmp_path: Path) -> None:
     assert runner.invoke(app, ["schema", "--output", str(out), "--check"]).exit_code == 0
     out.write_text("{}")
     assert runner.invoke(app, ["schema", "--output", str(out), "--check"]).exit_code == 1
+
+
+# --- serve wiring: the flag/env seam between Typer and create_app ---
+
+
+def _serve_kwargs(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> dict:
+    """Invoke `serve` and capture the kwargs it hands create_app.
+
+    The server tests call create_app directly, so without this the whole
+    translation layer — flag precedence, env fallbacks, the warnings — is
+    untested, which is exactly where its bugs live.
+    """
+    captured: dict = {}
+
+    def fake_create_app(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("argus_forge.server.create_app", fake_create_app)
+    monkeypatch.setattr("uvicorn.run", lambda *a, **k: None)
+    result = runner.invoke(app, ["serve", *argv])
+    assert result.exit_code == 0, result.output
+    captured["_stderr"] = result.output
+    return captured
+
+
+def test_serve_passes_export_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    kwargs = _serve_kwargs(monkeypatch, ["--export-root", "/data/out"])
+    assert kwargs["export_root"] == "/data/out"
+    assert "No export root" not in kwargs["_stderr"]
+
+
+def test_serve_warns_when_no_export_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert "No export root" in _serve_kwargs(monkeypatch, [])["_stderr"]
+
+
+def test_serve_export_root_env_silences_the_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(ARGUS_ROOT_ENV, "/data/out")
+    assert "No export root" not in _serve_kwargs(monkeypatch, [])["_stderr"]
+
+
+def test_serve_cors_flags_are_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
+    kwargs = _serve_kwargs(monkeypatch, ["--cors", "--cors-origin", "https://a.example", "--cors-any"])
+    assert kwargs["cors"] is True
+    assert kwargs["cors_origins"] == ["https://a.example"]
+    assert kwargs["cors_allow_any"] is True
+
+
+def test_serve_cors_warning_respects_the_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The warning must describe the app that actually gets built: with
+    FORGE_CORS_ORIGINS set, create_app enables CORS, so claiming it is disabled
+    sends the operator to debug a working config."""
+    assert "CORS is disabled" in _serve_kwargs(monkeypatch, [])["_stderr"]
+    monkeypatch.setenv(CORS_ORIGINS_ENV, "https://a.example")
+    assert "CORS is disabled" not in _serve_kwargs(monkeypatch, [])["_stderr"]
+
+
+def test_serve_no_run_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    kwargs = _serve_kwargs(monkeypatch, ["--no-run"])
+    assert kwargs["allow_run"] is False
+    assert "Demo-safe mode" in kwargs["_stderr"]
+
+
+def test_serve_readonly_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(READONLY_ENV, "1")
+    assert _serve_kwargs(monkeypatch, [])["allow_run"] is False
+
+
+def test_serve_readonly_env_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The compose file ships ARGUS_FORGE_READONLY=0 by default."""
+    monkeypatch.setenv(READONLY_ENV, "0")
+    assert _serve_kwargs(monkeypatch, [])["allow_run"] is True
+
+
+def test_serve_survives_a_typoed_readonly_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A mistyped flag must warn and stay off, not exit non-zero — under
+    compose's `restart: unless-stopped` a hard exit is a crash loop."""
+    monkeypatch.setenv(READONLY_ENV, "enabled")
+    assert _serve_kwargs(monkeypatch, [])["allow_run"] is True

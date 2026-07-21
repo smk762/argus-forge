@@ -4,24 +4,29 @@ services:
       context: .
       # hatch-vcs can't read git history from the build context (.git is
       # ignored) — hand the version in. Release images get the tag; local
-      # builds get the 0.0.0 default.
+      # builds get the 0.0.0+local default, which /health reports verbatim so a
+      # dev image is never mistaken for a tagged one.
       args:
-        VERSION: ${FORGE_VERSION:-0.0.0}
+        VERSION: ${FORGE_VERSION:-0.0.0+local}
     ports:
       - "${FORGE_PORT:-8103}:8103"
     environment:
       # Containment root for request-supplied export_dir paths. Required — the
       # API refuses every /inspect, /config and /run without it.
       ARGUS_FORGE_EXPORT_ROOT: /data/out
-      # Demo-safe mode: serve /config, refuse POST /run with 403. Set to 1 on
-      # any host without a GPU + sd-scripts, and on any publicly reachable one
-      # — a run is real code execution on the host (see runner.py's trust note).
-      ARGUS_FORGE_READONLY: ${ARGUS_FORGE_READONLY:-0}
-      # Browser origins allowed to call the API (comma-separated). Defaults to
-      # the localhost:3000 studio frontend when --cors is passed.
+      # Demo-safe mode: /config renders (dry-run only) and POST /run is refused
+      # with 403. Defaults ON because this image ships no trainer — no torch, no
+      # sd-scripts — so a run could only ever fail, and the port is published on
+      # 0.0.0.0 where a run would be real code execution on the host (see
+      # runner.py's trust note). Set to 0 only once you have mounted a trainer.
+      ARGUS_FORGE_READONLY: ${ARGUS_FORGE_READONLY:-1}
+      # Browser origins allowed to call the API (comma-separated). These are
+      # *added* to the localhost:3000 studio frontend that --cors allows.
       # FORGE_CORS_ORIGINS: https://studio.example.com
-      # Rewrite manifest source paths into container paths in emitted configs,
-      # e.g. FORGE_PATH_MAP=/home/me/pics=/data/images. Empty = no rewriting.
+      # Rewrite the container paths forge renders into the host paths the
+      # trainer will actually open, as container=host. Emitted configs name
+      # /data/out/...; a trainer running on the host needs your real directory.
+      # e.g. FORGE_PATH_MAP=/data/out=/home/me/argus/out. Empty = no rewriting.
       FORGE_PATH_MAP: ${FORGE_PATH_MAP:-}
       # Where the trainer checkout lives, for POST /run. Irrelevant in readonly
       # mode; uncomment (and mount it) to actually train.

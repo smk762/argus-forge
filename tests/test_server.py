@@ -179,6 +179,11 @@ def test_run_cancel_stops_it(client: TestClient, tmp_path: Path) -> None:
     assert cancel.status_code == 200
     assert cancel.json()["status"] == "cancelled"
     assert client.get(f"/run/{run_id}").json()["status"] == "cancelled"
+    # The replayed stream ends with a terminal `cancelled` event, distinct from
+    # `error` — a consumer must be able to tell a user cancel from a failure.
+    events = [json.loads(line) for line in client.get(f"/run/{run_id}/stream").text.splitlines() if line]
+    assert events[-1]["type"] == "cancelled"
+    assert not any(e["type"] == "error" for e in events)
 
 
 def test_runs_lists_tracked_runs(client: TestClient, tmp_path: Path) -> None:

@@ -248,7 +248,7 @@ class RunRequest(BaseModel):
     dry_run: bool = False
 
 
-RunEventType = Literal["start", "log", "exit", "error"]
+RunEventType = Literal["start", "log", "exit", "error", "cancelled"]
 
 
 class RunEvent(BaseModel):
@@ -258,6 +258,8 @@ class RunEvent(BaseModel):
     key for downstream eval (argus-proof). ``type`` selects which fields are set:
     ``start`` carries ``command`` + ``cwd``; ``log`` a line of trainer output in
     ``message``; ``exit`` the ``returncode``; ``error`` a failure ``message``.
+    ``cancelled`` is the terminal event for a run stopped by request — distinct
+    from ``error`` so a consumer never mistakes a user cancel for a failure.
     """
 
     run_id: str

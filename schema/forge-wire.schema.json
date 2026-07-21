@@ -516,7 +516,7 @@
       "type": "object"
     },
     "RunEvent": {
-      "description": "One NDJSON line streamed from a run.\n\n``run_id`` (the training_run_id) is stable for the whole run and is the join\nkey for downstream eval (argus-proof). ``type`` selects which fields are set:\n``start`` carries ``command`` + ``cwd``; ``log`` a line of trainer output in\n``message``; ``exit`` the ``returncode``; ``error`` a failure ``message``.",
+      "description": "One NDJSON line streamed from a run.\n\n``run_id`` (the training_run_id) is stable for the whole run and is the join\nkey for downstream eval (argus-proof). ``type`` selects which fields are set:\n``start`` carries ``command`` + ``cwd``; ``log`` a line of trainer output in\n``message``; ``exit`` the ``returncode``; ``error`` a failure ``message``.\n``cancelled`` is the terminal event for a run stopped by request \u2014 distinct\nfrom ``error`` so a consumer never mistakes a user cancel for a failure.",
       "properties": {
         "command": {
           "anyOf": [
@@ -578,7 +578,8 @@
             "start",
             "log",
             "exit",
-            "error"
+            "error",
+            "cancelled"
           ],
           "title": "Type",
           "type": "string"

@@ -164,9 +164,10 @@ class Job:
                     status = "failed"
         except asyncio.CancelledError:
             # Explicit cancel: astream_run's finally already reaped the process
-            # group; record it, tell viewers, and re-raise so the task ends
-            # cancelled (so cancel()/shutdown() observe a true cancellation).
-            self._publish(RunEvent(run_id=self.run_id, type="error", message="run cancelled"))
+            # group. Emit a terminal `cancelled` event (not `error`, so a stream
+            # consumer never reads a user cancel as a failure) and re-raise so the
+            # task ends cancelled (so cancel()/shutdown() observe a true cancel).
+            self._publish(RunEvent(run_id=self.run_id, type="cancelled", message="run cancelled"))
             self._finalize("cancelled")
             raise
         except Exception as exc:  # pragma: no cover - defensive; astream_run handles its own

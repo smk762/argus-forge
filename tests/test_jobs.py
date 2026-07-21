@@ -73,6 +73,19 @@ async def test_cancel_before_first_step_does_not_wedge(tmp_path: Path) -> None:
     assert all(isinstance(e, RunEvent) for e in events)
 
 
+async def test_cancel_emits_a_distinct_cancelled_event(tmp_path: Path) -> None:
+    """A cancel is surfaced on the stream as a terminal `cancelled` event, not an
+    `error` — so a consumer never mistakes a user cancel for a failure."""
+    job = _job(tmp_path, "echo up\nsleep 30\n")
+    job._task = asyncio.create_task(job._drive())
+    await asyncio.sleep(0.3)  # let it start and log before cancelling
+    await job.cancel()
+    assert job.status == "cancelled"
+    events = await asyncio.wait_for(_drain(job), timeout=2)  # replay the backlog
+    assert events[-1].type == "cancelled"
+    assert not any(e.type == "error" for e in events)
+
+
 async def test_start_event_survives_past_the_buffer(tmp_path: Path) -> None:
     """`start` carries command/cwd; a run longer than the event buffer must not
     drop it from a reconnecting viewer's replay."""

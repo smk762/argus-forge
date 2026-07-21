@@ -666,6 +666,18 @@
           "title": "Export Dir",
           "type": "string"
         },
+        "message": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Message"
+        },
         "returncode": {
           "anyOf": [
             {

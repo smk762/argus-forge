@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 
 import structlog
 
+from argus_forge.manifest import resolve_export_dir
 from argus_forge.models import RunEvent, RunRequest, RunState, RunStatus
 from argus_forge.runner import astream_run, new_run_id
 
@@ -71,8 +72,12 @@ class Job:
         self.req = req
         self.command = command
         self.cwd = cwd
+        # The resolved absolute export dir, matching DatasetInfo/ForgeResult (and
+        # what command/cwd derive from) rather than the raw request spelling.
+        self.export_dir = str(resolve_export_dir(req.export_dir))
         self.status: RunStatus = "running"
         self.returncode: int | None = None
+        self.message: str | None = None
         self.started_at = _now()
         self.ended_at: str | None = None
         self._events: deque[RunEvent] = deque(maxlen=MAX_BUFFERED_EVENTS)
@@ -92,13 +97,14 @@ class Job:
         return RunState(
             run_id=self.run_id,
             trainer=self.req.trainer,
-            export_dir=self.req.export_dir,
+            export_dir=self.export_dir,
             status=self.status,
             returncode=self.returncode,
             started_at=self.started_at,
             ended_at=self.ended_at,
             command=self.command,
             cwd=self.cwd,
+            message=self.message,
         )
 
     def _publish(self, ev: RunEvent) -> None:
@@ -162,17 +168,20 @@ class Job:
                     status = "succeeded" if ev.returncode == 0 else "failed"
                 elif ev.type == "error":
                     status = "failed"
+                    self.message = ev.message  # a launch failure carries its reason here
         except asyncio.CancelledError:
             # Explicit cancel: astream_run's finally already reaped the process
             # group. Emit a terminal `cancelled` event (not `error`, so a stream
             # consumer never reads a user cancel as a failure) and re-raise so the
             # task ends cancelled (so cancel()/shutdown() observe a true cancel).
-            self._publish(RunEvent(run_id=self.run_id, type="cancelled", message="run cancelled"))
+            self.message = "run cancelled"
+            self._publish(RunEvent(run_id=self.run_id, type="cancelled", message=self.message))
             self._finalize("cancelled")
             raise
         except Exception as exc:  # pragma: no cover - defensive; astream_run handles its own
             logger.exception("job_failed", run_id=self.run_id)
-            self._publish(RunEvent(run_id=self.run_id, type="error", message=f"run failed: {exc}"))
+            self.message = f"run failed: {exc}"
+            self._publish(RunEvent(run_id=self.run_id, type="error", message=self.message))
             status = "failed"
         self._finalize(status)
 
@@ -200,13 +209,13 @@ class JobRegistry:
     def __init__(self) -> None:
         self._jobs: dict[str, Job] = {}
 
-    def start(self, req: RunRequest, command: list[str], cwd: str, run_id: str | None = None) -> Job:
+    def start(self, req: RunRequest, command: list[str], cwd: str) -> Job:
         """Create a job and launch it on a background task (needs a running loop).
 
         The task is independent of the caller, so the run continues after the
         request that started it returns or disconnects.
         """
-        job = Job(run_id or new_run_id(), req, command, cwd)
+        job = Job(new_run_id(), req, command, cwd)
         job._task = asyncio.create_task(job._drive())
         self._jobs[job.run_id] = job
         self._evict()

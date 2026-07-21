@@ -8,6 +8,7 @@ dry run, a stalled subscriber, double-cancel — are testable and fast.
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -16,6 +17,7 @@ import pytest
 from conftest import forge_stub
 
 from argus_forge.jobs import MAX_SUBSCRIBER_LAG, Job, JobRegistry
+from argus_forge.manifest import resolve_export_dir
 from argus_forge.models import RunEvent, RunRequest
 from argus_forge.runner import prepare_run
 
@@ -119,6 +121,28 @@ async def test_registry_evicts_only_finished_and_keeps_newest(tmp_path: Path) ->
     await asyncio.wait_for(job._task, timeout=10)
     assert reg.get(job.run_id) is job
     assert job in reg.list()
+
+
+def test_state_reports_the_resolved_export_dir() -> None:
+    """RunState.export_dir is the resolved absolute path — matching what
+    command/cwd derive from, and what DatasetInfo/ForgeResult report."""
+    req = RunRequest(export_dir="some/relative/dir", trainer="kohya")
+    state = Job("rid", req, ["bash", "train.sh"], "/tmp").state()
+    assert os.path.isabs(state.export_dir)
+    assert state.export_dir == str(resolve_export_dir("some/relative/dir"))
+
+
+async def test_launch_failure_records_the_reason(tmp_path: Path) -> None:
+    """A run that can't be launched records why on the RunState, so a poller can
+    diagnose it without reading the event log."""
+    export = forge_stub(tmp_path, "kohya", "echo hi\n")
+    req = RunRequest(export_dir=str(export), trainer="kohya")
+    job = Job("rid", req, ["/nonexistent/trainer-binary"], str(tmp_path))
+    job._task = asyncio.create_task(job._drive())
+    await asyncio.wait_for(job._task, timeout=10)
+    assert job.status == "failed"
+    assert job.message and "failed to launch" in job.message
+    assert job.state().message == job.message
 
 
 async def test_registry_shutdown_cancels_in_flight_runs(tmp_path: Path) -> None:

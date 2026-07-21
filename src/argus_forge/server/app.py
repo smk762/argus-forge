@@ -27,7 +27,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 try:
-    from fastapi import FastAPI, HTTPException
+    from fastapi import Depends, FastAPI, HTTPException
     from fastapi.responses import StreamingResponse
 except ImportError as exc:  # pragma: no cover
     raise ImportError("Server requires: pip install argus-forge[server]") from exc
@@ -51,18 +51,21 @@ from argus_forge.models import (
 from argus_forge.runner import prepare_run
 
 
+class NDJSONResponse(StreamingResponse):
+    """StreamingResponse fixed to NDJSON, so the route's OpenAPI advertises
+    ``application/x-ndjson`` instead of the default (misleading) JSON."""
+
+    media_type = "application/x-ndjson"
+
+
 async def _ndjson(events: AsyncIterator[RunEvent]) -> AsyncIterator[str]:
     async for event in events:
         yield event.model_dump_json() + "\n"
 
 
-def _stream(job: Job) -> StreamingResponse:
+def _stream(job: Job) -> NDJSONResponse:
     """An NDJSON view of *job* — backlog then live events — tagged with its run id."""
-    return StreamingResponse(
-        _ndjson(job.subscribe()),
-        media_type="application/x-ndjson",
-        headers={"X-Training-Run-Id": job.run_id},
-    )
+    return NDJSONResponse(_ndjson(job.subscribe()), headers={"X-Training-Run-Id": job.run_id})
 
 
 def create_app(cors: bool = False, cors_origins: list[str] | None = None) -> FastAPI:
@@ -94,6 +97,9 @@ def create_app(cors: bool = False, cors_origins: list[str] | None = None) -> Fas
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
+            # Non-simple headers are hidden from cross-origin JS unless exposed;
+            # the run-id join key rides here on GET /run/{id}/stream.
+            expose_headers=["X-Training-Run-Id"],
         )
 
     @app.get("/health")
@@ -136,25 +142,25 @@ def create_app(cors: bool = False, cors_origins: list[str] | None = None) -> Fas
     async def runs() -> list[RunState]:
         return [job.state() for job in registry.list()]
 
-    @app.get("/run/{run_id}", response_model=RunState)
-    async def run_status(run_id: str) -> RunState:
+    def _require_job(run_id: str) -> Job:
+        """Resolve a run by id or 404 — shared by the three /run/{id} endpoints."""
         job = registry.get(run_id)
         if job is None:
             raise HTTPException(status_code=404, detail=f"no such run: {run_id}")
+        return job
+
+    NOT_FOUND = {404: {"description": "no such run"}}
+
+    @app.get("/run/{run_id}", response_model=RunState, responses=NOT_FOUND)
+    async def run_status(job: Job = Depends(_require_job)) -> RunState:
         return job.state()
 
-    @app.get("/run/{run_id}/stream")
-    async def run_stream(run_id: str) -> StreamingResponse:
-        job = registry.get(run_id)
-        if job is None:
-            raise HTTPException(status_code=404, detail=f"no such run: {run_id}")
+    @app.get("/run/{run_id}/stream", response_class=NDJSONResponse, responses=NOT_FOUND)
+    async def run_stream(job: Job = Depends(_require_job)) -> NDJSONResponse:
         return _stream(job)
 
-    @app.post("/run/{run_id}/cancel", response_model=RunState)
-    async def run_cancel(run_id: str) -> RunState:
-        job = registry.get(run_id)
-        if job is None:
-            raise HTTPException(status_code=404, detail=f"no such run: {run_id}")
+    @app.post("/run/{run_id}/cancel", response_model=RunState, responses=NOT_FOUND)
+    async def run_cancel(job: Job = Depends(_require_job)) -> RunState:
         await job.cancel()
         return job.state()
 

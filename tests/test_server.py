@@ -9,6 +9,7 @@ import pytest
 from conftest import ExportFactory, forge_stub
 from fastapi.testclient import TestClient
 
+from argus_forge.manifest import resolve_export_dir
 from argus_forge.server import create_app
 
 
@@ -192,6 +193,37 @@ def test_runs_lists_tracked_runs(client: TestClient, tmp_path: Path) -> None:
     _wait_terminal(client, run_id)
     listed = client.get("/runs").json()
     assert run_id in {r["run_id"] for r in listed}
+
+
+def test_failed_launch_reports_the_reason(client: TestClient, tmp_path: Path) -> None:
+    """A run that can't be launched (NUL in an env value) surfaces why on the
+    polled RunState, not only in the event stream."""
+    export = forge_stub(tmp_path, "kohya", "echo hi\n")
+    run_id = client.post("/run", json={"export_dir": str(export), "trainer": "kohya", "env": {"X": "a\x00b"}}).json()[
+        "run_id"
+    ]
+    final = _wait_terminal(client, run_id)
+    assert final["status"] == "failed"
+    assert final["message"] and "failed to launch" in final["message"]
+
+
+def test_run_state_export_dir_is_resolved(client: TestClient, tmp_path: Path) -> None:
+    export = forge_stub(tmp_path, "kohya", "echo hi\n")
+    body = client.post("/run", json={"export_dir": str(export), "trainer": "kohya"}).json()
+    # The shared resolution policy (absolute, but not symlink-resolved).
+    assert body["export_dir"] == str(resolve_export_dir(str(export)))
+
+
+def test_cors_exposes_the_run_id_header(client: TestClient, tmp_path: Path) -> None:
+    """Cross-origin JS can only read X-Training-Run-Id if it's explicitly exposed."""
+    export = forge_stub(tmp_path, "kohya", "echo hi\n")
+    resp = client.post(
+        "/run",
+        json={"export_dir": str(export), "trainer": "kohya"},
+        headers={"Origin": "http://ui.local"},
+    )
+    exposed = resp.headers.get("access-control-expose-headers", "").lower()
+    assert "x-training-run-id" in exposed
 
 
 def test_unknown_run_is_404(client: TestClient) -> None:

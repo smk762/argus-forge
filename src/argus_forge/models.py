@@ -290,6 +290,9 @@ class RunState(BaseModel):
     ended_at: str | None = None
     command: list[str] = Field(default_factory=list)
     cwd: str | None = None
+    # Terminal detail — the launch/failure/cancel reason, when there is one — so
+    # a poller can diagnose a ``failed``/``cancelled`` run without the event log.
+    message: str | None = None
 
 
 class TrainerInfo(BaseModel):

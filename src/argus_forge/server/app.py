@@ -24,8 +24,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-
-import structlog
+from contextlib import asynccontextmanager
 
 try:
     from fastapi import FastAPI, HTTPException
@@ -51,8 +50,6 @@ from argus_forge.models import (
 )
 from argus_forge.runner import prepare_run
 
-logger = structlog.get_logger()
-
 
 async def _ndjson(events: AsyncIterator[RunEvent]) -> AsyncIterator[str]:
     async for event in events:
@@ -70,10 +67,22 @@ def _stream(job: Job) -> StreamingResponse:
 
 def create_app(cors: bool = False, cors_origins: list[str] | None = None) -> FastAPI:
     """Create the forge FastAPI application."""
+    registry = JobRegistry()
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        # No startup work; on shutdown, cancel every in-flight run so no trainer
+        # is left without an owner in this process.
+        try:
+            yield
+        finally:
+            await registry.shutdown()
+
     app = FastAPI(
         title="Argus Forge",
         description="Training bridge: curated exports in, ready-to-run LoRA training configs out.",
         version=__version__,
+        lifespan=lifespan,
     )
 
     if cors:
@@ -86,12 +95,6 @@ def create_app(cors: bool = False, cors_origins: list[str] | None = None) -> Fas
             allow_methods=["*"],
             allow_headers=["*"],
         )
-
-    registry = JobRegistry()
-
-    @app.on_event("shutdown")
-    async def _stop_runs() -> None:  # cancel in-flight runs when the server stops
-        await registry.shutdown()
 
     @app.get("/health")
     async def health() -> dict[str, str]:

@@ -121,6 +121,21 @@ async def test_registry_evicts_only_finished_and_keeps_newest(tmp_path: Path) ->
     assert job in reg.list()
 
 
+async def test_registry_shutdown_cancels_in_flight_runs(tmp_path: Path) -> None:
+    """The lifespan shutdown hook calls this: an in-flight run must be cancelled
+    so no trainer is left without an owner when the server stops."""
+    reg = JobRegistry()
+    export = forge_stub(tmp_path, "kohya", "echo up\nsleep 30\n")
+    req = RunRequest(export_dir=str(export), trainer="kohya")
+    command, cwd = prepare_run(req)
+    job = reg.start(req, command, cwd)
+    await asyncio.sleep(0.3)  # let it reach 'running'
+    assert job.status == "running"
+    await asyncio.wait_for(reg.shutdown(), timeout=10)
+    assert job.status == "cancelled"
+    assert job.finished
+
+
 @pytest.mark.skipif(not shutil.which("pgrep"), reason="pgrep not available")
 async def test_double_cancel_does_not_orphan_the_trainer(tmp_path: Path) -> None:
     """A second cancel arriving during the first cancel's SIGTERM grace must not

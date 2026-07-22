@@ -15,7 +15,9 @@ Scope: in-process and single-server. A server restart forgets in-flight runs
 This lives under ``server/`` rather than in the core package because the
 registry exists only to serve the HTTP layer, and its fan-out is built on
 ``anyio`` — a dependency the ``server`` extra already carries (via starlette)
-but a CLI-only install has no reason to acquire.
+but a CLI-only install has no reason to acquire. It still imports on ``anyio``
+alone: :mod:`argus_forge.server` resolves the FastAPI entry points lazily, so
+importing this module does not drag in fastapi/starlette/argus-cortex with it.
 """
 
 from __future__ import annotations
@@ -49,8 +51,16 @@ logger = structlog.get_logger()
 MAX_BUFFERED_EVENTS = 2000
 # How far a single /stream viewer may fall behind before its channel starts
 # dropping its oldest un-read events. Bounds the memory one stalled reader can
-# pin, independently of MAX_BUFFERED_EVENTS (which bounds only the shared tail).
-MAX_SUBSCRIBER_LAG = MAX_BUFFERED_EVENTS
+# pin, independently of MAX_BUFFERED_EVENTS (which bounds only the shared tail) —
+# so it is its own literal, not an alias, and the two can be tuned apart.
+#
+# Must be >= 1, and note the trap if you tune it: `asyncio.Queue(maxsize=0)` meant
+# *unbounded*, but a memory object stream with `max_buffer_size=0` buffers nothing
+# at all, so `offer()` would silently drop every event and /stream would return an
+# empty body for a live run. The two spellings mean opposite things at 0.
+MAX_SUBSCRIBER_LAG = 2000
+if MAX_SUBSCRIBER_LAG < 1:  # pragma: no cover - guards a mis-tune, not a runtime path
+    raise ValueError("MAX_SUBSCRIBER_LAG must be >= 1: 0 buffers nothing and drops every event")
 # Finished runs kept in the registry (most-recent-first) before eviction.
 MAX_FINISHED_JOBS = 64
 
@@ -166,18 +176,34 @@ class Job:
         retained buffer. The `start` event is prepended if it has already rolled
         off the bounded tail, so command/cwd are always the first thing seen.
         """
-        sub = _Subscriber.open()
         backlog = list(self._events)
-        if self._start is not None and self._start not in backlog:
+        # `_start` is the first event ever appended, so while it is still inside
+        # the bounded tail it is at index 0. An identity check on the head is
+        # exact and O(1); `self._start not in backlog` ran RunEvent.__eq__ over
+        # the whole 2000-event window — ~2 ms of event-loop time per subscribe,
+        # and only on long runs, which is exactly when reconnects happen.
+        if self._start is not None and (not backlog or backlog[0] is not self._start):
             backlog.insert(0, self._start)
-        done = self._done.is_set()
-        self._subscribers.add(sub)
-        try:
+
+        if self._done.is_set():
+            # Finished: the retained buffer is the whole story. Return before
+            # opening a channel at all — registering one here would allocate a
+            # stream pair nothing can ever publish to, and abandon its receive
+            # half unclosed.
             for ev in backlog:
                 yield ev
-            if done:
-                return
-            async with sub.receive:
+            return
+
+        sub = _Subscriber.open()
+        self._subscribers.add(sub)  # still no await since the snapshot above
+        try:
+            # `with sub.receive` wraps the whole body, not just the live loop, so
+            # the viewer's half is closed on *every* exit — including a client
+            # disconnecting part-way through the backlog, which unwinds before
+            # the live loop is ever reached.
+            with sub.receive:
+                for ev in backlog:
+                    yield ev
                 async for ev in sub.receive:
                     yield ev
         finally:
@@ -198,6 +224,13 @@ class Job:
         self._done.set()
         for sub in list(self._subscribers):
             sub.close()
+        # Drop them too. A viewer whose generator is never resumed again — a
+        # half-open /stream reader, the very case MAX_SUBSCRIBER_LAG exists for —
+        # never runs subscribe()'s finally, so without this it keeps its closed
+        # channel and up to MAX_SUBSCRIBER_LAG buffered events pinned to this
+        # finished job for as long as the registry retains it (MAX_FINISHED_JOBS).
+        # subscribe()'s own discard is a harmless no-op afterwards.
+        self._subscribers.clear()
 
     async def _drive(self) -> None:
         status: RunStatus = "succeeded"  # a run that ends without a terminal event (dry_run) still succeeded
@@ -232,16 +265,34 @@ class Job:
         # runner._terminate's SIGTERM grace would abort its SIGKILL escalation
         # and orphan the trainer. There is no await between the read and the set.
         if self._cancelling:
+            # Wait for the in-flight cancel instead of returning straight away:
+            # shutdown() must not report every trainer reaped while another
+            # caller is still inside runner._terminate's SIGTERM->SIGKILL grace.
+            # The finally below guarantees _done is set, so this cannot wedge.
+            await self._done.wait()
             return
         self._cancelling = True
-        task = self._task
-        if task is not None and not task.done():
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-        # If the task was cancelled before its first step, _drive's body — and
-        # so its finalize — never ran; make sure the job doesn't stay "running".
-        self._finalize("cancelled")
+        try:
+            task = self._task
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    # `task` ending cancelled is the expected outcome here and
+                    # must not propagate. But if *this* coroutine was itself
+                    # cancelled (uvicorn hitting timeout_graceful_shutdown), a
+                    # bare suppress would report a completed shutdown for one
+                    # that was actually cut short — so let that one through.
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling():
+                        raise
+        finally:
+            # If the task was cancelled before its first step, _drive's body — and
+            # so its finalize — never ran; make sure the job doesn't stay
+            # "running". In a finally so a propagating cancel still releases
+            # anyone parked on _done above.
+            self._finalize("cancelled")
 
 
 class JobRegistry:

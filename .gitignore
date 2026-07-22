@@ -8,3 +8,7 @@ build/
 .ruff_cache/
 # hatch-vcs writes this at build time (version derived from git tags)
 src/argus_forge/_version.py
+# Default dataset volume for docker-compose (${FORGE_OUTPUT_PATH:-./out}) —
+# curated exports, never source.
+/out/
+.env

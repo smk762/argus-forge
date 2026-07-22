@@ -1,0 +1,38 @@
+# Keep the build context small and hermetic. VCS metadata is intentionally
+# excluded — the Dockerfile passes the version in via SETUPTOOLS_SCM_PRETEND_VERSION
+# (the VERSION build-arg), so hatch-vcs never needs to read git history.
+#
+# NOTE: .dockerignore is NOT .gitignore. Patterns are matched against the whole
+# path with Go filepath.Match and there is no implicit recursion — a bare
+# `__pycache__` excludes only ./__pycache__, so anything that can appear at
+# depth needs an explicit `**/`.
+.git
+.venv
+venv
+.pytest_cache
+.ruff_cache
+.mypy_cache
+**/__pycache__
+**/*.pyc
+.env
+**/.env
+dist
+build
+**/*.egg-info
+**/node_modules
+.claude
+
+# The dataset volume docker-compose.yaml mounts by default
+# (${FORGE_OUTPUT_PATH:-./out}). Curated exports land here, so without this a
+# `docker compose up` followed by a rebuild bakes the whole image tree into a
+# layer — the opposite of the hygiene this file exists for.
+out
+
+# Not needed at runtime: the package is installed into site-packages, and the
+# source tree is only here for `uv pip install .`.
+tests
+schema
+.github
+Makefile
+docker-compose.yaml
+.copier-answers.yml

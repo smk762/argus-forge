@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -293,7 +294,25 @@ def schema(
 def serve(
     port: int = Option(8103, "--port", "-p", help="Port to listen on"),
     host: str = Option("0.0.0.0", "--host", help="Host to bind to"),
-    cors: bool = Option(False, "--cors", help="Enable CORS (allow all origins)"),
+    cors: bool = Option(False, "--cors", help="Enable CORS for the localhost:3000 studio frontend"),
+    cors_origin: list[str] = Option(
+        [], "--cors-origin", help="Allowed CORS origin (repeatable; implies CORS; or FORGE_CORS_ORIGINS)"
+    ),
+    cors_any: bool = Option(
+        False,
+        "--cors-any",
+        help="Allow ANY origin, credential-less (public demos; pair with --cors-origin to let your own frontend write)",
+    ),
+    export_root: str | None = Option(
+        None,
+        "--export-root",
+        help="Contain request export_dir paths under this directory (or ARGUS_FORGE_EXPORT_ROOT); required by the API",
+    ),
+    no_run: bool = Option(
+        False,
+        "--no-run",
+        help="Demo-safe mode: /config renders (dry-run only) but /run is refused with 403. Or ARGUS_FORGE_READONLY=1.",
+    ),
 ) -> None:
     """Start the argus-forge micro-server (FastAPI) on :8103."""
     try:
@@ -303,8 +322,8 @@ def serve(
         raise typer.Exit(1) from _exc
 
     from argus_forge.core import env_path_map
-    from argus_forge.models import ForgeError
-    from argus_forge.server import create_app
+    from argus_forge.models import ARGUS_ROOT_ENV, CORS_ORIGINS_ENV, LEGACY_ROOT_ENV, ForgeError
+    from argus_forge.server import create_app, env_readonly
 
     structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
     try:
@@ -312,13 +331,42 @@ def serve(
     except ForgeError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from exc
-    if not cors:
+
+    # These warnings must describe the app create_app will actually build, so
+    # they resolve the same env fallbacks it does — a warning that contradicts
+    # the running server sends the operator to debug a working config.
+    resolved_root = export_root or os.environ.get(ARGUS_ROOT_ENV) or os.environ.get(LEGACY_ROOT_ENV)
+    # Normalised the way create_app normalises them, so a value that only *looks*
+    # like an origin list (",", whitespace) is correctly reported as no CORS at
+    # all rather than silently suppressing the warning for a server that has none.
+    env_origins = [o for o in (os.environ.get(CORS_ORIGINS_ENV) or "").split(",") if o.strip().rstrip("/")]
+    cors_on = bool(cors or cors_origin or cors_any or env_origins)
+    readonly = no_run or env_readonly()
+
+    if not cors_on:
         typer.echo(
             "CORS is disabled — browser clients (e.g. the argus-studio frontend on :3000) "
-            "will fail with 'Failed to fetch'; pass --cors to allow them.",
+            f"will fail with 'Failed to fetch'; pass --cors (or set {CORS_ORIGINS_ENV}) to allow them.",
             err=True,
         )
-    application = create_app(cors=cors)
+    if readonly:
+        typer.echo(
+            "Demo-safe mode: /run is refused with 403 and /config renders dry-run only (nothing is written).",
+            err=True,
+        )
+    if not resolved_root:
+        typer.echo(
+            "No export root — /inspect, /config and /run will refuse every request with a 400. "
+            f"Pass --export-root (or set {ARGUS_ROOT_ENV}) to the dir holding curator exports.",
+            err=True,
+        )
+    application = create_app(
+        cors=cors,
+        cors_origins=list(cors_origin) or None,
+        cors_allow_any=cors_any,
+        export_root=export_root,
+        allow_run=not readonly,
+    )
     uvicorn.run(application, host=host, port=port)
 
 

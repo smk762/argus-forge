@@ -55,6 +55,27 @@ CAPTION_EXT = ".txt"
 # (the compose file sets it from OUTPUT_DIR). Request-level maps win over it.
 PATH_MAP_ENV = "FORGE_PATH_MAP"
 
+# Deployment knobs, named here (not in the server module) so the CLI can talk
+# about them without importing FastAPI, and so there is one spelling of each.
+# Containment root for request-supplied paths; ARGUS_* is the deployment-facing
+# name (argus-halo), FORGE_EXPORT_PATH the legacy alias.
+ARGUS_ROOT_ENV = "ARGUS_FORGE_EXPORT_ROOT"
+LEGACY_ROOT_ENV = "FORGE_EXPORT_PATH"
+# Demo-safe mode: render configs, never train and never write.
+READONLY_ENV = "ARGUS_FORGE_READONLY"
+# Comma-separated browser origins allowed to call the API.
+CORS_ORIGINS_ENV = "FORGE_CORS_ORIGINS"
+
+# Every env var the server reads. Tests clear these so a value exported in a
+# developer's shell cannot decide whether the security tests pass.
+SERVER_ENV_VARS: tuple[str, ...] = (
+    PATH_MAP_ENV,
+    ARGUS_ROOT_ENV,
+    LEGACY_ROOT_ENV,
+    READONLY_ENV,
+    CORS_ORIGINS_ENV,
+)
+
 
 class ForgeError(RuntimeError):
     """A user-facing failure: bad input dir, unreadable manifest, bad request."""
@@ -201,6 +222,11 @@ class ForgeRequest(BaseModel):
     # Copy caption sidecars that argus-lens wrote next to the *source* images
     # (manifest abs_path) into the export dir, where trainers expect them.
     collect_captions: bool = True
+    # NB: the containment root for those sidecar *sources* is deliberately NOT a
+    # field here. ``abs_path`` is manifest-supplied and on a server as untrusted
+    # as the request itself, so the fence is a caller-side argument to
+    # ``forge_config`` (the server passes its export root, the CLI passes None)
+    # — a request that could name its own fence could also widen it to "/".
     # Prefix rewrites for absolute paths rendered into configs, e.g.
     # {"/data/out": "/home/you/argus/out"} when forge runs in a container but
     # the trainer runs on the host. Longest prefix wins; merged over the

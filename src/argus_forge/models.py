@@ -222,13 +222,11 @@ class ForgeRequest(BaseModel):
     # Copy caption sidecars that argus-lens wrote next to the *source* images
     # (manifest abs_path) into the export dir, where trainers expect them.
     collect_captions: bool = True
-    # Containment root for those sidecar *sources*. ``abs_path`` comes from the
-    # manifest, which on a server is as untrusted as the request itself: without
-    # this, any readable ``.txt`` on the host is copied into the shared volume
-    # and — for trainers that inline captions — echoed back in the response.
-    # The server sets it to its export root; None (the CLI) means unconstrained,
-    # since the CLI is the operator's own shell.
-    caption_source_root: str | None = None
+    # NB: the containment root for those sidecar *sources* is deliberately NOT a
+    # field here. ``abs_path`` is manifest-supplied and on a server as untrusted
+    # as the request itself, so the fence is a caller-side argument to
+    # ``forge_config`` (the server passes its export root, the CLI passes None)
+    # — a request that could name its own fence could also widen it to "/".
     # Prefix rewrites for absolute paths rendered into configs, e.g.
     # {"/data/out": "/home/you/argus/out"} when forge runs in a container but
     # the trainer runs on the host. Longest prefix wins; merged over the

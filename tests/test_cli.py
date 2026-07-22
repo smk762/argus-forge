@@ -206,13 +206,17 @@ def test_serve_readonly_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_serve_readonly_env_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The compose file ships ARGUS_FORGE_READONLY=0 by default."""
+    """Both the image and the compose file default this to 1, so 0 is the
+    explicit opt-out an operator sets once a trainer is mounted."""
     monkeypatch.setenv(READONLY_ENV, "0")
     assert _serve_kwargs(monkeypatch, [])["allow_run"] is True
 
 
-def test_serve_survives_a_typoed_readonly_value(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A mistyped flag must warn and stay off, not exit non-zero — under
-    compose's `restart: unless-stopped` a hard exit is a crash loop."""
+def test_serve_fails_safe_on_a_typoed_readonly_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A mistyped protection flag must warn and keep the guard ON, not exit
+    non-zero (under compose's `restart: unless-stopped` a hard exit is a crash
+    loop) and not silently enable writes on an assumed-public host."""
     monkeypatch.setenv(READONLY_ENV, "enabled")
-    assert _serve_kwargs(monkeypatch, [])["allow_run"] is True
+    kwargs = _serve_kwargs(monkeypatch, [])
+    assert kwargs["allow_run"] is False
+    assert "Demo-safe mode" in kwargs["_stderr"]

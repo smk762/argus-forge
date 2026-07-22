@@ -321,11 +321,9 @@ def serve(
         typer.echo("Server requires: pip install argus-forge[server]", err=True)
         raise typer.Exit(1) from _exc
 
-    from argus_cortex.server import env_flag
-
     from argus_forge.core import env_path_map
-    from argus_forge.models import ARGUS_ROOT_ENV, CORS_ORIGINS_ENV, LEGACY_ROOT_ENV, READONLY_ENV, ForgeError
-    from argus_forge.server import create_app
+    from argus_forge.models import ARGUS_ROOT_ENV, CORS_ORIGINS_ENV, LEGACY_ROOT_ENV, ForgeError
+    from argus_forge.server import create_app, env_readonly
 
     structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
     try:
@@ -338,8 +336,12 @@ def serve(
     # they resolve the same env fallbacks it does — a warning that contradicts
     # the running server sends the operator to debug a working config.
     resolved_root = export_root or os.environ.get(ARGUS_ROOT_ENV) or os.environ.get(LEGACY_ROOT_ENV)
-    cors_on = bool(cors or cors_origin or cors_any or os.environ.get(CORS_ORIGINS_ENV))
-    readonly = no_run or env_flag(READONLY_ENV)
+    # Normalised the way create_app normalises them, so a value that only *looks*
+    # like an origin list (",", whitespace) is correctly reported as no CORS at
+    # all rather than silently suppressing the warning for a server that has none.
+    env_origins = [o for o in (os.environ.get(CORS_ORIGINS_ENV) or "").split(",") if o.strip().rstrip("/")]
+    cors_on = bool(cors or cors_origin or cors_any or env_origins)
+    readonly = no_run or env_readonly()
 
     if not cors_on:
         typer.echo(

@@ -29,6 +29,14 @@ First tagged release — the version that publishes `ghcr.io/smk762/argus-forge`
     `manifest.resolve_export_dir` owns that policy and `path_map` prefixes are
     matched against it. A symlinked root (`/data/out -> /mnt/big/out`) keeps
     rewriting correctly.
+  - The check runs on the *absolutised* candidate — exactly the path returned
+    and then opened — so "checked" and "used" are always the same file.
+    Resolving the raw candidate instead validated a different one, because
+    `os.path.abspath` cancels `..` lexically while `resolve()` cancels it
+    against the symlink's target: with an in-root `d -> <root>/x/y`, the request
+    `d/../../evil` resolved inside the root (so it passed) yet abspath'd to
+    `<root>/../evil`, and that escaped path was what every endpoint went on to
+    read, write and execute.
   - The export root itself is not a valid `export_dir`: a blank or `"."` field
     would otherwise merge every sibling export into one dataset and write a
     `forge/` tree at the top of the shared volume.
@@ -65,7 +73,12 @@ First tagged release — the version that publishes `ghcr.io/smk762/argus-forge`
   hold without it.
 - `/health` reports `export_root` alongside `training`, and answers even when
   the configured root cannot be resolved, so a liveness probe never 500s on a
-  misconfigured or hung volume.
+  misconfigured or hung volume. It reports the root only when it is actually
+  usable: `resolve()` is non-strict, so an unmounted volume (the image run
+  without `-v`, the commonest misconfiguration) used to answer "ok" with a root
+  while every request 400'd on "not a directory". The value is the
+  un-dereferenced spelling `/inspect` also returns, since `path_map` prefixes
+  are matched against it.
 
 ### Added
 
@@ -86,13 +99,19 @@ First tagged release — the version that publishes `ghcr.io/smk762/argus-forge`
   affordance up front instead of discovering the refusal by clicking. Required
   for the public demo, whose host is GPU-less by design (argus-halo#7).
 - Container image published to GHCR on `v*` tags (#15), plus a
-  `docker-compose.yaml` for local runs. The compose stack defaults to
-  demo-safe mode, since the image ships no trainer.
+  `docker-compose.yaml` for local runs. **The image itself** defaults to
+  demo-safe mode (`ENV ARGUS_FORGE_READONLY=1`), not just the compose stack: it
+  ships no trainer, and it publishes the port on 0.0.0.0 where a run is real
+  code execution and an unauthenticated `/config` would overwrite the curator's
+  `metadata.jsonl`, so a bare `docker run` has to be as locked down as
+  `docker compose up`.
 - `argus-cortex[server]>=0.2.0` is a `server`-extra dependency, for the suite's
   shared write-guard and env-flag helpers.
-- `caption_source_root` on `ForgeRequest`: the containment root for manifest
-  `abs_path` caption sources. Set by the server, `None` (unconstrained) for the
-  CLI.
+- `caption_source_root`: the containment root for manifest `abs_path` caption
+  sources. A keyword argument to `forge_config`, deliberately **not** a field on
+  `ForgeRequest` — a security boundary a request could name is one it could
+  widen to `/`. The server passes its export root; the CLI passes `None`
+  (unconstrained — it is the operator's own shell).
 
 ### Changed
 
@@ -106,10 +125,14 @@ First tagged release — the version that publishes `ghcr.io/smk762/argus-forge`
   `uv` (~64 MB) and the source tree no longer ship, and the published image
   works from `docker run -v ...:/data/out` alone instead of starting healthy
   and refusing every request. 534 MB → **211 MB**.
-- `ARGUS_FORGE_READONLY` is read by `create_app` (via
-  `argus_cortex.server.env_flag`) rather than only by the `serve` command, so
-  every ASGI entry point honours it and an unrecognised value warns and stays
-  off instead of exiting non-zero into a restart loop.
+- `ARGUS_FORGE_READONLY` is read by `create_app` rather than only by the `serve`
+  command, so every ASGI entry point honours it. Being a *protection* flag it
+  fails **safe**: an unrecognised value (`=y`, `=enabled`) warns and keeps the
+  guard on, where `env_flag`'s enable-a-feature default of "off" would have
+  silently enabled training and `/config` writes on a host that is
+  unauthenticated and public by assumption. Still never fatal — under compose's
+  `restart: unless-stopped` a hard exit is a crash loop. Only an explicit
+  `0`/`false`/`no`/`off` allows runs.
 - Added `.dockerignore`. The build context previously carried `.venv` (60 MB),
   `.git`, and the pytest/ruff caches straight into the image layer. Patterns
   use `**/` where needed — `.dockerignore` has no implicit recursion — and the
@@ -131,6 +154,18 @@ First tagged release — the version that publishes `ghcr.io/smk762/argus-forge`
 - `serve`'s startup warnings resolve the same env fallbacks `create_app` does,
   so `FORGE_CORS_ORIGINS` no longer produces a "CORS is disabled" warning about
   a server that has CORS enabled.
+- A manifest row whose `abs_path` is empty (or `/`) no longer 500s `POST
+  /config`. Only `exported_path` is validated, so `abs_path` can name no file at
+  all, and `Path("").with_suffix(...)` raised straight through the catch-all. A
+  row with no readable source path simply has no sidecar to collect.
+- Demo-safe `POST /config` now says in `warnings` that it was forced to a dry
+  run, so a caller that asked for a real write learns it did not happen from the
+  body rather than by noticing every file's `path` is null.
+- `--cors-origin` / `FORGE_CORS_ORIGINS` no longer drop the localhost:3000
+  defaults when a bare `--cors` was not also passed. They *add* to the dev
+  frontend (as the README says) rather than replacing it, for the write-guard
+  trust list as well as the CORS allow-list — naming a production origin must
+  not cost you the studio frontend you were already developing against.
 - The release workflow derives the image version from the tag itself rather
   than `docker/metadata-action`'s `version` output, which falls back to the
   literal string `latest` for a non-semver `v*` tag; and `latest` is no longer

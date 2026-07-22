@@ -51,8 +51,11 @@ docker run --rm -p 8103:8103 -v /path/to/out:/data/out ghcr.io/smk762/argus-forg
 docker compose up          # local build; see docker-compose.yaml (and .env.example) for the knobs
 ```
 
-The image contains no trainer, so `docker compose up` starts in [demo-safe mode](#demo-safe-mode-no-training)
-— configs render, training is refused. Set `ARGUS_FORGE_READONLY=0` once you have mounted one.
+The image contains no trainer, so it defaults to [demo-safe mode](#demo-safe-mode-no-training) — configs
+render, training is refused and nothing is written. That default lives in the image itself
+(`ARGUS_FORGE_READONLY=1`), so a bare `docker run` is as locked down as `docker compose up`; the port is
+published on 0.0.0.0 and a run is real code execution on the host, so the safe direction is the default one.
+Set `ARGUS_FORGE_READONLY=0` on a trusted host once you have mounted a trainer.
 
 ## CLI
 
@@ -155,13 +158,17 @@ on such a host a malformed request deserves the same answer as a well-formed one
 routes added later without a per-route guard to forget.
 
 Demo-safe also means **write**-safe: `POST /config` is forced to `dry_run`, so it renders and returns the
-files but never touches the volume. Forge has no authentication, so on a publicly reachable host an
-ordinary `curl` would otherwise overwrite the curator's `metadata.jsonl` and leave an executable `train.sh`
-behind on shared storage.
+files but never touches the volume, and says so in `warnings` — a caller that asked for a real write learns
+it did not happen from the body, not by noticing every file's `path` is null. Forge has no authentication,
+so on a publicly reachable host an ordinary `curl` would otherwise overwrite the curator's
+`metadata.jsonl` and leave an executable `train.sh` behind on shared storage.
 
 `GET /health` reports `"training": "enabled" | "disabled"`, so a frontend can disable its train button up
-front rather than discovering the refusal by clicking it. The compose file turns this mode **on by
-default** — the image ships no trainer, so a run there could only ever fail.
+front rather than discovering the refusal by clicking it. **The published image turns this mode on by
+default** (and the compose file with it) — it ships no trainer, so a run there could only ever fail.
+`ARGUS_FORGE_READONLY` is a protection flag, so it fails *safe*: a value it cannot parse (`=y`, `=enabled`)
+warns and keeps the guard on rather than quietly enabling writes. Only an explicit `0`/`false`/`no`/`off`
+turns it off.
 
 ### Container ↔ host paths (`path_map`)
 

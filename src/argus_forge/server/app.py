@@ -52,7 +52,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 try:
-    from argus_cortex.server import WriteGuard, cross_site_refuse, env_flag
+    from argus_cortex.server import FALSY, TRUTHY, WriteGuard, cross_site_refuse, env_flag
     from fastapi import Depends, FastAPI, HTTPException
     from fastapi.responses import StreamingResponse
     from starlette.datastructures import Headers
@@ -119,10 +119,20 @@ def _resolve_within(root: Path, resolved_root: Path, requested: str) -> Path:
     rather than followed. The value *returned* keeps the caller's spelling —
     only made absolute — because :func:`resolve_export_dir` owns that policy and
     ``path_map`` prefixes are matched against the un-dereferenced form.
+
+    The check is run on the *absolutised* candidate, i.e. on exactly the path
+    this function returns and every caller then opens. Resolving the raw
+    candidate instead would validate a different file: ``os.path.abspath``
+    cancels ``..`` lexically while ``resolve()`` cancels it against the symlink's
+    *target*, so for a root containing ``d -> <root>/x/y`` the request
+    ``d/../../evil`` resolves to ``<root>/evil`` (inside, so it would pass) yet
+    abspaths to ``<root>/../evil`` (outside, and that is the path actually used).
+    Deciding on the returned form keeps "checked" and "used" the same file.
     """
     candidate = Path(requested) if os.path.isabs(requested) else root / requested
+    absolute = Path(os.path.abspath(candidate))
     try:
-        probe = candidate.resolve()
+        probe = absolute.resolve()
     except (ValueError, OSError, RuntimeError) as exc:
         # An embedded NUL (ValueError), an unreadable component (OSError), or a
         # symlink loop — which pathlib raises as RuntimeError, *not* an OSError,
@@ -138,7 +148,7 @@ def _resolve_within(root: Path, resolved_root: Path, requested: str) -> Path:
         )
     if resolved_root not in probe.parents:
         raise HTTPException(status_code=400, detail=f"path escapes the export root: {requested}")
-    return Path(os.path.abspath(candidate))
+    return absolute
 
 
 class NDJSONResponse(StreamingResponse):
@@ -161,6 +171,25 @@ def _stream(job: Job) -> NDJSONResponse:
 TRAINING_DISABLED_DETAIL = (
     "training is disabled on this host — POST /config still renders configs (dry-run) to run elsewhere"
 )
+
+
+def env_readonly() -> bool:
+    """Whether demo-safe mode is on, per ``ARGUS_FORGE_READONLY``.
+
+    This is a *protection* flag, so it fails **safe**: a set-but-unrecognised
+    value (a typo like ``=y`` or ``=enabled``) keeps the guard on rather than
+    silently enabling training and writes on a host that is unauthenticated and
+    public by assumption. ``env_flag``'s "unrecognised means off" suits
+    enable-a-feature flags, where off is the safe direction; here it is not.
+    Unset, or an explicit falsy value (``0``/``false``/``no``/``off``), allows
+    runs. Never fatal — under compose's ``restart: unless-stopped`` a hard exit
+    would be a crash loop.
+    """
+    raw = os.environ.get(READONLY_ENV, "").strip().lower()
+    on = env_flag(READONLY_ENV)  # recognised truthy; also logs the typo warning
+    if raw and raw not in FALSY and raw not in TRUTHY:
+        return True
+    return on
 
 
 def _refuse_training(scope: Scope, headers: Headers) -> str | None:
@@ -206,7 +235,7 @@ def create_app(
     registry = JobRegistry()
 
     if allow_run is None:
-        allow_run = not env_flag(READONLY_ENV)
+        allow_run = not env_readonly()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -233,12 +262,14 @@ def create_app(
     # thing as --cors-any, so it takes the same safe path rather than silently
     # becoming origin reflection.
     wildcard = cors_allow_any or "*" in origins
-    # Origins the operator actually named. A bare --cors *adds* the localhost
-    # dev frontend rather than being replaced by --cors-origin, and the wildcard
-    # does not erase this list: it grants anonymous reads to everyone while the
-    # named origins keep the cross-site write grant they were given explicitly.
-    named = _dedupe([*(_LOCALHOST_ORIGINS if cors else []), *(o for o in origins if o != "*")])
     cors_enabled = bool(cors or origins or cors_allow_any)
+    # Origins the operator actually named. --cors-origin *adds* to the localhost
+    # dev frontend rather than replacing it, so the defaults ride along whenever
+    # CORS is on at all — naming a production origin must not silently cost you
+    # the studio frontend you were already developing against. The wildcard does
+    # not erase this list either: it grants anonymous reads to everyone while the
+    # named origins keep the cross-site write grant they were given explicitly.
+    named = _dedupe([*(_LOCALHOST_ORIGINS if cors_enabled else []), *(o for o in origins if o != "*")])
 
     # Demo-safe mode: refuse every /run route before the body is validated.
     # Registered first so it is the innermost guard — a hostile cross-origin
@@ -284,6 +315,25 @@ def create_app(
         except (ValueError, OSError, RuntimeError):
             root_error = f"export root cannot be resolved: {raw_root}"
 
+    # What /health advertises. Two things it must NOT do: claim a root that no
+    # request can actually use, and hand back a spelling that defeats path_map.
+    #
+    # `resolve()` is non-strict, so an unmounted volume (the published image run
+    # without -v, the commonest misconfiguration) resolves fine — health would
+    # answer "ok" with a root while every /inspect, /config and /run 400s on
+    # "not a directory". One is_dir() at startup, off the request path, keeps the
+    # probe honest. It is deliberately a snapshot: a volume mounted later still
+    # works, because _fenced re-checks per request; health merely under-reports.
+    #
+    # The spelling is the *un-dereferenced* absolute form, the same policy
+    # resolve_export_dir owns and that /inspect returns, because path_map
+    # prefixes are matched against it — reporting the realpath of a symlinked
+    # root (/data/out -> /mnt/big/out) would make a client that echoes this value
+    # back silently lose every rewrite.
+    health_root: str | None = None
+    if root is not None and resolved_root is not None and root.is_dir():
+        health_root = str(Path(os.path.abspath(root)))
+
     def _fenced(export_dir: str) -> Path:
         """A request's ``export_dir``, proven to lie under the export root.
 
@@ -304,7 +354,7 @@ def create_app(
         "status": "ok",
         "service": "argus-forge",
         "version": __version__,
-        "export_root": str(resolved_root) if resolved_root else None,
+        "export_root": health_root,
         # Lets a client disable its train affordance up front instead of
         # learning about demo-safe mode from a 403.
         "training": "enabled" if allow_run else "disabled",
@@ -331,6 +381,10 @@ def create_app(
 
     @app.post("/config", response_model=ForgeResult)
     async def config(req: ForgeRequest) -> ForgeResult:
+        # Whether the caller asked for a real write and demo-safe mode took it
+        # away. Reported as a warning below: a 200 whose files all have a null
+        # path is otherwise the only clue that nothing reached the volume.
+        forced_dry_run = not allow_run and not req.dry_run
         if not allow_run:
             # A demo-safe host is unauthenticated and publicly reachable by
             # assumption, and a non-dry /config overwrites the curator's
@@ -342,11 +396,20 @@ def create_app(
             # Rewrite to the containment-checked path, so everything downstream
             # (emitters, caption collection, the forge/ tree) inherits the
             # fence. caption_source_root fences the *other* untrusted path a
-            # request reaches: the manifest's abs_path caption sources.
+            # request reaches: the manifest's abs_path caption sources. It is a
+            # server-side argument, never a request field, so no caller can widen
+            # its own fence.
             fenced = _fenced(req.export_dir)
-            return forge_config(
-                req.model_copy(update={"export_dir": str(fenced), "caption_source_root": str(resolved_root)})
+            result = forge_config(
+                req.model_copy(update={"export_dir": str(fenced)}),
+                caption_source_root=str(resolved_root),
             )
+            if forced_dry_run:
+                result.warnings.append(
+                    "demo-safe mode: rendered dry-run only — nothing was written to the export dir "
+                    "(GET /health reports training: disabled)"
+                )
+            return result
 
         try:
             return await asyncio.to_thread(work)

@@ -138,7 +138,14 @@ def collect_captions(
     for row, dest_img in zip(rows, resolved, strict=True):
         if dest_img is None or (skip and dest_img in skip):
             continue
-        src_caption = caption_path(Path(row.abs_path))
+        # abs_path is manifest-supplied and only ``exported_path`` is validated,
+        # so it can be empty or "/" — both of which name no file and make
+        # with_suffix() raise ValueError. A row with no readable source path
+        # simply has no sidecar to collect; it must not become a 500.
+        try:
+            src_caption = caption_path(Path(row.abs_path))
+        except ValueError:
+            continue
         if not src_caption.is_file():
             continue
         if root is not None and not _within(root, src_caption):
@@ -153,8 +160,15 @@ def collect_captions(
     return copied, refused
 
 
-def forge_config(req: ForgeRequest) -> ForgeResult:
-    """Render (and unless ``dry_run``, write) trainer configs for an export dir."""
+def forge_config(req: ForgeRequest, *, caption_source_root: str | None = None) -> ForgeResult:
+    """Render (and unless ``dry_run``, write) trainer configs for an export dir.
+
+    *caption_source_root* fences the manifest's ``abs_path`` caption sources (see
+    :func:`collect_captions`). It is a caller-side argument rather than a request
+    field precisely because it is a security boundary: the server passes its
+    export root, the CLI passes None (unconstrained — it is the operator's own
+    shell), and no HTTP caller can name it and thereby widen its own fence.
+    """
     export_dir = resolve_export_dir(req.export_dir)
     if req.trainer not in EMITTERS:
         raise ForgeError(f"unknown trainer: {req.trainer} (expected one of {', '.join(EMITTERS)})")
@@ -197,7 +211,7 @@ def forge_config(req: ForgeRequest) -> ForgeResult:
             dry_run=req.dry_run,
             resolved=resolved,
             skip=set(collisions),
-            source_root=Path(req.caption_source_root) if req.caption_source_root else None,
+            source_root=Path(caption_source_root) if caption_source_root else None,
         )
         if captions_collected and req.dry_run:
             warnings.append(f"dry run: {captions_collected} caption sidecars would be collected from sources")

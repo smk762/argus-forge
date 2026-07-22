@@ -38,8 +38,17 @@ COPY --from=builder /usr/local/bin/argus-forge /usr/local/bin/argus-forge
 # healthy-looking service the frontend cannot use.
 ENV ARGUS_FORGE_EXPORT_ROOT=/data/out
 
+# Demo-safe by default: /config renders but never writes, and every /run route is
+# refused with 403. This image ships no trainer — no torch, no sd-scripts — so a
+# run could only ever fail, and the port is published on 0.0.0.0 where a run is
+# real code execution on the host (see runner.py's trust note) and an
+# unauthenticated /config would overwrite the curator's metadata.jsonl. The
+# default therefore has to be the safe one: `docker run` of this image is as
+# locked down as `docker compose up`, and .env.example's "Defaults to 1" is true
+# of the image itself rather than only of the compose file. Set to 0 on a trusted
+# host once a trainer is mounted. See README "Demo-safe mode".
+ENV ARGUS_FORGE_READONLY=1
+
 EXPOSE 8103
 
-# Full API by default; a GPU-less/public deployment opts out of live training
-# with ARGUS_FORGE_READONLY=1 (or `serve --no-run`). See README "Demo-safe mode".
 CMD ["argus-forge", "serve", "--port", "8103", "--cors"]

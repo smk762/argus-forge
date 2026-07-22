@@ -346,15 +346,33 @@ def test_readonly_mode_comes_from_the_env(tmp_path: Path) -> None:
         del os.environ[READONLY_ENV]
 
 
-def test_unrecognised_readonly_value_is_off_not_fatal(tmp_path: Path) -> None:
-    """A typo must warn and leave the guard off, not kill the process — the
-    suite contract in argus_cortex.server.env_flag."""
+def test_unrecognised_readonly_value_fails_safe_not_fatal(tmp_path: Path) -> None:
+    """A typo must warn and leave the guard ON, and must not kill the process.
+
+    ARGUS_FORGE_READONLY is a *protection* flag, so the unrecognised case has to
+    fail safe: an operator who writes `=y` or `=enabled` is asking for the guard,
+    and treating that as "off" would silently enable training and /config writes
+    on a host that is unauthenticated and public by assumption. Not fatal either
+    — under compose's `restart: unless-stopped` a hard exit is a crash loop.
+    """
     os.environ[READONLY_ENV] = "enabled"
     try:
         with TestClient(create_app(export_root=str(tmp_path))) as c:
-            assert c.get("/health").json()["training"] == "enabled"
+            assert c.get("/health").json()["training"] == "disabled"
+            assert c.post("/run", json={}).status_code == 403
     finally:
         del os.environ[READONLY_ENV]
+
+
+def test_explicitly_falsy_readonly_allows_runs(tmp_path: Path) -> None:
+    """Failing safe on a typo must not make the documented off-switch unreachable."""
+    for value in ("0", "false", "no", "off"):
+        os.environ[READONLY_ENV] = value
+        try:
+            with TestClient(create_app(export_root=str(tmp_path))) as c:
+                assert c.get("/health").json()["training"] == "enabled", value
+        finally:
+            del os.environ[READONLY_ENV]
 
 
 def test_readonly_inspect_still_works(readonly_client: TestClient, export_factory: ExportFactory) -> None:
@@ -652,3 +670,127 @@ def test_non_browser_clients_still_write(client: TestClient, export_factory: Exp
     export = export_factory(n=5)
     resp = client.post("/config", json={"export_dir": str(export), "trainer": "kohya", "dry_run": True})
     assert resp.status_code == 200
+
+
+# --- regressions from the PR review ---
+
+
+@pytest.mark.parametrize("route", ["/inspect", "/config"])
+def test_symlink_plus_dotdot_cannot_escape_the_root(client: TestClient, tmp_path: Path, route: str) -> None:
+    """`..` after an in-root symlink must not escape the fence.
+
+    The check and the returned path have to denote the same file. Resolving the
+    raw candidate validates a *different* one: `resolve()` cancels `..` against
+    the symlink's target while `os.path.abspath` cancels it lexically, so with
+    `d -> <root>/x/y` the request below resolved to `<root>/evil` (inside, so it
+    passed) yet abspath'd to `<root>/../evil` — and that escaped path was what
+    every endpoint then read, wrote and executed.
+    """
+    (tmp_path / "x" / "y").mkdir(parents=True)
+    (tmp_path / "d").symlink_to(tmp_path / "x" / "y")
+    outside = tmp_path.parent / f"{tmp_path.name}-escape"
+    outside.mkdir(exist_ok=True)
+
+    resp = client.post(route, json={"export_dir": "d/../../evil", "trainer": "kohya"})
+    assert resp.status_code == 400
+    assert "escapes the export root" in resp.json()["detail"]
+    assert not (tmp_path.parent / "evil").exists()  # nothing forged outside the root
+
+
+def test_symlink_into_the_root_still_works(client: TestClient, tmp_path: Path, export_factory: ExportFactory) -> None:
+    """Tightening the traversal check must not break an ordinary in-root symlink."""
+    export_factory(n=5, name="realset")
+    (tmp_path / "latest").symlink_to(tmp_path / "realset")
+    resp = client.post("/inspect", json={"export_dir": "latest"})
+    assert resp.status_code == 200
+    assert resp.json()["image_count"] == 5
+
+
+def test_health_does_not_advertise_an_unmounted_root(tmp_path: Path) -> None:
+    """The published image's default root with no volume mounted: resolve()
+    succeeds (it is non-strict), so health used to answer "ok" with a root while
+    every request 400'd on "not a directory" — a probe and a frontend both read
+    the service as usable when nothing was."""
+    missing = tmp_path / "not-mounted"
+    with TestClient(create_app(export_root=str(missing))) as c:
+        health = c.get("/health")
+        assert health.status_code == 200
+        assert health.json()["export_root"] is None
+        resp = c.post("/inspect", json={"export_dir": "x"})
+        assert resp.status_code == 400
+        assert "not a directory" in resp.json()["detail"]
+
+
+def test_health_reports_the_undereferenced_spelling(tmp_path: Path, export_factory: ExportFactory) -> None:
+    """/health must report the same spelling /inspect returns, since path_map
+    prefixes are matched against it — the realpath of a symlinked root would make
+    a client that echoes the value back silently lose every rewrite."""
+    export_factory(n=3, name="myset")
+    link = tmp_path.parent / f"{tmp_path.name}-healthlink"
+    if link.is_symlink():
+        link.unlink()
+    link.symlink_to(tmp_path)
+    with TestClient(create_app(export_root=str(link))) as c:
+        assert c.get("/health").json()["export_root"] == str(link)
+
+
+def test_readonly_config_warns_that_it_was_forced_to_dry_run(
+    readonly_client: TestClient, export_factory: ExportFactory
+) -> None:
+    """A caller that asked for a real write must learn from the body that it did
+    not happen, not have to infer it from every file's path being null."""
+    export = export_factory(n=5)
+    body = readonly_client.post("/config", json={"export_dir": str(export), "trainer": "kohya"}).json()
+    assert any("demo-safe" in w for w in body["warnings"])
+    assert not (export / "forge").exists()
+
+
+def test_asking_for_a_dry_run_is_not_reported_as_forced(
+    readonly_client: TestClient, export_factory: ExportFactory
+) -> None:
+    """The warning is about a *taken away* write, so it must not fire for a
+    caller who asked for a dry run in the first place."""
+    export = export_factory(n=5)
+    body = readonly_client.post("/config", json={"export_dir": str(export), "trainer": "kohya", "dry_run": True}).json()
+    assert not any("demo-safe" in w for w in body["warnings"])
+
+
+def test_named_origin_does_not_drop_the_localhost_defaults(tmp_path: Path, export_factory: ExportFactory) -> None:
+    """--cors-origin *adds* to the localhost dev frontend rather than replacing
+    it (README), so naming a production origin must not cost you the studio
+    frontend you were already developing against — for reads or for writes."""
+    export = export_factory(n=5)
+    with TestClient(create_app(cors_origins=["https://prod.example"], export_root=str(tmp_path))) as c:
+        for origin in ("http://localhost:3000", "https://prod.example"):
+            assert c.get("/health", headers={"Origin": origin}).headers["access-control-allow-origin"] == origin
+            resp = c.post(
+                "/config",
+                json={"export_dir": str(export), "trainer": "kohya", "dry_run": True},
+                headers={"Origin": origin},
+            )
+            assert resp.status_code == 200, origin
+
+
+def test_empty_manifest_abs_path_is_not_a_500(client: TestClient, tmp_path: Path) -> None:
+    """abs_path is manifest-supplied and only exported_path is validated, so it
+    can be empty — which names no file and made with_suffix() raise straight
+    through the /config catch-all as a 500."""
+    export = tmp_path / "emptyabs"
+    export.mkdir()
+    (export / "a.png").write_bytes(b"x")
+    row = {"manifest_version": "2.0", "rel_path": "a.png", "abs_path": "", "exported_path": "a.png"}
+    (export / "manifest.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    resp = client.post("/config", json={"export_dir": "emptyabs", "trainer": "kohya", "dry_run": True})
+    assert resp.status_code == 200
+    assert resp.json()["files"]
+
+
+def test_caption_source_root_is_not_a_request_field() -> None:
+    """The caption fence is a server-side argument, never wire input: a request
+    that could name its own containment root could also widen it to "/"."""
+    from argus_forge.models import ForgeRequest
+
+    assert "caption_source_root" not in ForgeRequest.model_fields
+    req = ForgeRequest(export_dir="/x", trainer="kohya", caption_source_root="/")
+    assert not hasattr(req, "caption_source_root")

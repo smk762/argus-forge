@@ -18,36 +18,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **The viewer fan-out is built on `anyio` typed memory object streams** instead
-  of a hand-rolled `asyncio.Queue[object]` plus an end-of-stream sentinel.
-  Closing the producer's half of a viewer's stream ends its `async for`, so the
-  sentinel — and the unverifiable `assert isinstance(...)` that `python -O`
-  compiled out — are gone. The registry only ever existed to serve the HTTP
-  layer, so it now lives beside it and `anyio` stays out of a CLI-only install;
-  `anyio>=4` is declared explicitly on the `server` extra rather than relied on
-  transitively via starlette. `argus_forge.server` resolves its FastAPI entry
-  points lazily so the registry still imports on `anyio` alone, without dragging
-  in fastapi/starlette/argus-cortex.
-  - The bounded, **drop-oldest** subscriber policy (`MAX_SUBSCRIBER_LAG`) is
-    preserved explicitly, since anyio's streams apply backpressure when full and
-    one stalled `/stream` reader must never throttle the trainer's stdout. The
-    wire format is unchanged: `GET /run/{id}/stream` emits byte-for-byte what it
-    did. Note `MAX_SUBSCRIBER_LAG` must now be `>= 1` — `asyncio.Queue(maxsize=0)`
-    meant *unbounded*, but `max_buffer_size=0` buffers nothing and would drop
-    every event, so the two spellings mean opposite things at `0`.
+- **A `/stream` viewer is now a cursor into the job's shared event buffer**
+  rather than a queue of its own (issue #21). The registry retained the same
+  2000-event window *twice* — once in `Job._events`, once per viewer — so N
+  stalled readers pinned N copies of it (~1 MB each) on top of the shared tail.
+  Total retention is now `MAX_BUFFERED_EVENTS` objects regardless of how many
+  viewers are attached; a viewer costs a sequence number and an `asyncio.Event`.
+  - Drop-oldest for a lagging viewer is unchanged in effect but is now a
+    *consequence* of the one shared bound: a cursor that falls behind the window
+    resumes at the oldest retained event. `MAX_SUBSCRIBER_LAG` is gone, and with
+    it the second eviction policy, the `max_buffer_size=0` trap, and the
+    backlog/live split in `subscribe()` — a cursor cannot straddle a seam, so
+    "no event dropped or duplicated across it" is structural rather than an
+    invariant a comment had to assert.
+  - `_publish` still never waits on a viewer, so one stalled `/stream` reader
+    cannot apply backpressure to the trainer's stdout. The wire format is
+    unchanged: `GET /run/{id}/stream` emits byte-for-byte what it did.
+  - The registry only ever existed to serve the HTTP layer, so it now lives
+    beside it at `argus_forge.server.jobs`. It is pure-stdlib asyncio again —
+    the `anyio` dependency the fan-out briefly took on (and the explicit
+    `anyio>=4` on the `server` extra) is gone, as is the end-of-stream sentinel
+    and its unverifiable `assert isinstance(...)` that `python -O` compiled out.
+    `argus_forge.server` resolves its FastAPI entry points lazily, so the
+    registry imports without dragging in fastapi/starlette/argus-cortex.
 
 ### Fixed
 
-- A viewer's receive channel is closed on **every** exit from `subscribe()`, not
-  only the live one. Replaying an already-finished run, or disconnecting part-way
-  through the backlog, left an unclosed `MemoryObjectReceiveStream` — one
-  `ResourceWarning` per `GET /run/{id}/stream`, and a hard failure under
-  `-W error::ResourceWarning` or `PYTHONDEVMODE=1`. Replaying a finished run no
-  longer opens a channel at all, since nothing can publish to it.
-- `_finalize` now drops its subscribers as well as closing them. A half-open
-  `/stream` reader never resumes its generator, so it never ran `subscribe()`'s
-  cleanup and kept a closed channel — plus up to `MAX_SUBSCRIBER_LAG` buffered
-  events — pinned to the finished job for as long as the registry retained it.
 - `Job.cancel()` no longer returns early when another cancel is in flight; it
   waits for it. `JobRegistry.shutdown()` could otherwise report every trainer
   reaped while a request-side cancel was still inside `runner._terminate`'s

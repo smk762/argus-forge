@@ -12,7 +12,8 @@ import gc
 import os
 import shutil
 import subprocess
-import warnings
+import weakref
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
@@ -21,7 +22,7 @@ from conftest import forge_stub
 from argus_forge.manifest import resolve_export_dir
 from argus_forge.models import RunEvent, RunRequest
 from argus_forge.runner import prepare_run
-from argus_forge.server.jobs import MAX_SUBSCRIBER_LAG, Job, JobRegistry, _Subscriber
+from argus_forge.server.jobs import MAX_BUFFERED_EVENTS, Job, JobRegistry
 
 
 def _job(tmp_path: Path, body: str, *, dry_run: bool = False, run_id: str = "rid") -> Job:
@@ -34,6 +35,20 @@ def _job(tmp_path: Path, body: str, *, dry_run: bool = False, run_id: str = "rid
 
 async def _drain(job: Job) -> list[RunEvent]:
     return [ev async for ev in job.subscribe()]
+
+
+async def _attach(job: Job) -> AsyncIterator[RunEvent]:
+    """Start a viewer and leave it parked, having read nothing.
+
+    ``subscribe`` is an async generator: its body — and so the cursor's
+    registration — doesn't run until the first ``__anext__``. These tests need a
+    *registered* viewer, so drive it once against a pre-published event.
+    """
+    job._publish(RunEvent(run_id=job.run_id, type="log", message="attached"))
+    viewer = job.subscribe()
+    assert (await viewer.__anext__()).message == "attached"
+    assert job._subscribers, "viewer never registered"
+    return viewer
 
 
 async def test_dry_run_reaches_terminal_status(tmp_path: Path) -> None:
@@ -93,7 +108,7 @@ async def test_cancel_emits_a_distinct_cancelled_event(tmp_path: Path) -> None:
 async def test_start_event_survives_past_the_buffer(tmp_path: Path) -> None:
     """`start` carries command/cwd; a run longer than the event buffer must not
     drop it from a reconnecting viewer's replay."""
-    n = MAX_SUBSCRIBER_LAG + 50
+    n = MAX_BUFFERED_EVENTS + 50
     job = _job(tmp_path, f"for i in $(seq 1 {n}); do echo line$i; done\n")
     job._task = asyncio.create_task(job._drive())
     await asyncio.wait_for(job._task, timeout=30)
@@ -102,57 +117,81 @@ async def test_start_event_survives_past_the_buffer(tmp_path: Path) -> None:
     assert events[0].command and events[0].cwd
 
 
-async def test_stalled_subscriber_queue_is_bounded(tmp_path: Path) -> None:
-    """A subscriber that registers but never reads must not accumulate the whole
-    run: its channel is bounded and drops its oldest un-read events, rather than
-    applying backpressure that would throttle the trainer's stdout."""
+async def test_a_stalled_viewer_resumes_at_the_oldest_retained_event(tmp_path: Path) -> None:
+    """A viewer that never reads must not accumulate the whole run. Its cursor
+    falls out of the shared window and resumes at the window's tail — a drop, but
+    one that costs the producer nothing: `_publish` is synchronous and never
+    waits on a viewer, so a stalled reader can't throttle the trainer's stdout."""
     job = _job(tmp_path, "echo hi\n")
-    # Register a raw channel the way subscribe() does, then never drain it.
-    # Closed on the way out: an un-closed anyio stream pair raises ResourceWarning
-    # from its __del__, which is the very leak this file must not normalise.
-    sub = _Subscriber.open()
-    job._subscribers.add(sub)
-    try:
-        for i in range(MAX_SUBSCRIBER_LAG * 3):
-            job._publish(RunEvent(run_id=job.run_id, type="log", message=f"line{i}"))
-        buffered = sub.receive.statistics().current_buffer_used
-        assert buffered <= MAX_SUBSCRIBER_LAG
-        # Drop-oldest, not drop-newest: the viewer keeps the most recent events.
-        assert sub.receive.receive_nowait().message == f"line{MAX_SUBSCRIBER_LAG * 3 - buffered}"
-    finally:
-        job._subscribers.discard(sub)
-        sub.close()
-        sub.receive.close()
+    viewer = await _attach(job)
+    n = MAX_BUFFERED_EVENTS * 3
+    for i in range(n):
+        job._publish(RunEvent(run_id=job.run_id, type="log", message=f"line{i}"))
+    job._finalize("succeeded")  # so the parked viewer ends instead of blocking
+
+    rest = [ev async for ev in viewer]
+    # Only the shared window survived, and it is the *newest* end of the run:
+    # drop-oldest, in order, no duplicates.
+    assert len(rest) == MAX_BUFFERED_EVENTS
+    assert [ev.message for ev in rest] == [f"line{i}" for i in range(n - MAX_BUFFERED_EVENTS, n)]
 
 
-async def test_subscriber_close_releases_both_halves() -> None:
-    """`_Subscriber` owns a *pair*, so a viewer that goes away must leave neither
-    half open — an unclosed one only surfaces as a ResourceWarning at GC, which
-    is why the asymmetry went unnoticed. Asserted through the wrapper, so a
-    close() that forgets a half fails here rather than in a warnings summary."""
-    sub = _Subscriber.open()
-    sub.close()
-    sub.receive.close()
-    assert sub.send._closed and sub.receive._closed
+async def test_total_retention_is_the_shared_window_not_per_viewer(tmp_path: Path) -> None:
+    """The property the per-viewer-channel design could not satisfy: N stalled
+    viewers must pin the *same* bounded window, not N copies of it. Asserted on
+    live objects, since that is the memory claim — each viewer holds a cursor,
+    and the only strong references to events are the job's own deque."""
+    job = _job(tmp_path, "echo hi\n")
+    viewers = [await _attach(job) for _ in range(5)]
+    assert len(job._subscribers) == 5
+
+    alive: list[weakref.ref[RunEvent]] = []
+    for i in range(MAX_BUFFERED_EVENTS * 3):
+        ev = RunEvent(run_id=job.run_id, type="log", message=f"line{i}")
+        alive.append(weakref.ref(ev))
+        job._publish(ev)
+    del ev
+    gc.collect()
+
+    retained = sum(ref() is not None for ref in alive)
+    assert retained <= MAX_BUFFERED_EVENTS  # not 5 x MAX_BUFFERED_EVENTS
+    assert retained == len(job._events)
+
+    job._finalize("succeeded")
+    for viewer in viewers:
+        await viewer.aclose()
 
 
-async def test_replaying_a_finished_run_leaves_no_open_stream(tmp_path: Path) -> None:
+async def test_replaying_a_finished_run_registers_nothing_lasting(tmp_path: Path) -> None:
     """The common reconnect path: /run/{id}/stream on a run that already ended.
-    It must not leave an unclosed MemoryObjectReceiveStream behind (nor register
-    a channel nothing can publish to)."""
+    It replays the retained buffer, ends on its own, and leaves no viewer behind
+    holding the finished job."""
     job = _job(tmp_path, "echo hi\n")
     job._task = asyncio.create_task(job._drive())
     await asyncio.wait_for(job._task, timeout=10)
     assert job.finished
 
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        replayed = [ev async for ev in job.subscribe()]
-        gc.collect()
+    replayed = await asyncio.wait_for(_drain(job), timeout=2)
     assert replayed and replayed[0].type == "start"
+    assert replayed[-1].type == "exit"
     assert not job._subscribers
-    leaked = [w for w in caught if issubclass(w.category, ResourceWarning)]
-    assert not leaked, [str(w.message) for w in leaked]
+
+
+async def test_a_late_viewer_sees_every_event_exactly_once(tmp_path: Path) -> None:
+    """A viewer attached mid-run reads forward from one buffer, so the old
+    backlog/live seam — the place a broadcast fan-out can drop or duplicate an
+    event — cannot desynchronise: no gap, no repeat, no reordering."""
+    job = _job(tmp_path, "echo hi\n")
+    viewer = await _attach(job)
+    seen: list[str] = []
+    for i in range(50):
+        job._publish(RunEvent(run_id=job.run_id, type="log", message=f"line{i}"))
+        if i % 7 == 0:  # read part-way, so the viewer repeatedly catches up and re-parks
+            seen.append((await viewer.__anext__()).message)
+    job._finalize("succeeded")
+
+    seen += [ev.message async for ev in viewer]
+    assert seen == [f"line{i}" for i in range(50)]
 
 
 async def test_live_viewer_sees_progress_then_ends_at_finalize(tmp_path: Path) -> None:

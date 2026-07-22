@@ -62,7 +62,15 @@ jobs:
 
   publish-pypi:
     runs-on: ubuntu-latest
-    needs: publish-testpypi
+    # Ordered *after* the TestPyPI rehearsal so its outcome is visible first, but
+    # deliberately not gated on it. A TestPyPI-only fault — a missing trusted
+    # publisher, an index outage — must not silently withhold the real release:
+    # that failure mode shipped argus-proof images for two tags with no wheel on
+    # PyPI, and nothing surfaced it because publish-image is independent.
+    # Only the build + install gate is required; a TestPyPI failure still marks
+    # the whole run failed, so the problem stays loud.
+    needs: [test-install, publish-testpypi]
+    if: "!cancelled() && needs.test-install.result == 'success'"
     environment: pypi
     steps:
       - uses: actions/download-artifact@v4

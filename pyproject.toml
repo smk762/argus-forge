@@ -29,7 +29,7 @@ dependencies = [
 # helpers (argus_cortex.server); it pulls starlette, which fastapi provides too.
 server = ["fastapi>=0.110", "uvicorn>=0.27", "python-multipart>=0.0.7", "argus-cortex[server]>=0.2.0"]
 cli = ["typer>=0.12", "rich>=13.0"]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff==0.15.16", "httpx>=0.27"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff==0.15.16", "httpx>=0.27", "httpx2>=2.7"]
 
 [project.scripts]
 argus-forge = "argus_forge.cli:app"

@@ -1,4 +1,4 @@
-"""Direct unit tests for the job registry (argus_forge.jobs).
+"""Direct unit tests for the job registry (argus_forge.server.jobs).
 
 These exercise Job/JobRegistry without the HTTP layer, so the lifecycle edges
 that a TestClient can't reach — cancel-before-first-step, terminal status on a
@@ -16,10 +16,10 @@ from pathlib import Path
 import pytest
 from conftest import forge_stub
 
-from argus_forge.jobs import MAX_SUBSCRIBER_LAG, Job, JobRegistry
 from argus_forge.manifest import resolve_export_dir
 from argus_forge.models import RunEvent, RunRequest
 from argus_forge.runner import prepare_run
+from argus_forge.server.jobs import MAX_SUBSCRIBER_LAG, Job, JobRegistry, _Subscriber
 
 
 def _job(tmp_path: Path, body: str, *, dry_run: bool = False, run_id: str = "rid") -> Job:
@@ -102,14 +102,40 @@ async def test_start_event_survives_past_the_buffer(tmp_path: Path) -> None:
 
 async def test_stalled_subscriber_queue_is_bounded(tmp_path: Path) -> None:
     """A subscriber that registers but never reads must not accumulate the whole
-    run: its queue is bounded and drops its oldest un-read events."""
+    run: its channel is bounded and drops its oldest un-read events, rather than
+    applying backpressure that would throttle the trainer's stdout."""
     job = _job(tmp_path, "echo hi\n")
-    # Register a raw queue the way subscribe() does, then never drain it.
-    q: asyncio.Queue[object] = asyncio.Queue(maxsize=MAX_SUBSCRIBER_LAG)
-    job._subscribers.add(q)
+    # Register a raw channel the way subscribe() does, then never drain it.
+    sub = _Subscriber.open()
+    job._subscribers.add(sub)
     for i in range(MAX_SUBSCRIBER_LAG * 3):
         job._publish(RunEvent(run_id=job.run_id, type="log", message=f"line{i}"))
-    assert q.qsize() <= MAX_SUBSCRIBER_LAG
+    buffered = sub.receive.statistics().current_buffer_used
+    assert buffered <= MAX_SUBSCRIBER_LAG
+    # Drop-oldest, not drop-newest: the viewer keeps the most recent events.
+    assert sub.receive.receive_nowait().message == f"line{MAX_SUBSCRIBER_LAG * 3 - buffered}"
+
+
+async def test_live_viewer_sees_progress_then_ends_at_finalize(tmp_path: Path) -> None:
+    """A viewer attached *before* the run ends follows it live and terminates on
+    its own when the job finalizes — no sentinel, no hang. Closing the producer's
+    half is what ends the iteration, and events already buffered still arrive."""
+    job = _job(tmp_path, "echo one\necho two\n")
+    events: list[RunEvent] = []
+
+    async def watch() -> None:
+        async for ev in job.subscribe():
+            events.append(ev)
+
+    viewer = asyncio.create_task(watch())
+    await asyncio.sleep(0)  # let it register before the run publishes anything
+    job._task = asyncio.create_task(job._drive())
+    await asyncio.wait_for(viewer, timeout=10)  # ends because _finalize closed it
+    assert job.finished
+    assert [e.type for e in events][0] == "start"
+    assert any(e.type == "log" and e.message == "one" for e in events)
+    assert events[-1].type == "exit"
+    assert not job._subscribers  # the viewer unregistered on the way out
 
 
 async def test_registry_evicts_only_finished_and_keeps_newest(tmp_path: Path) -> None:

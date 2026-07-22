@@ -29,7 +29,7 @@ matched against it. Manifest ``abs_path`` caption sources are fenced too — see
 
 ``POST /run`` shells out to a script forge generated (see
 :mod:`argus_forge.runner`) on a background job that outlives the request (see
-:mod:`argus_forge.jobs`): it returns the run's id immediately, and progress is
+:mod:`argus_forge.server.jobs`): it returns the run's id immediately, and progress is
 watched (and re-watched) via ``GET /run/{id}/stream``.
 
 Because a run is real code execution on the host (see the trust note in
@@ -63,7 +63,6 @@ except ImportError as exc:  # pragma: no cover
 from argus_forge import __version__
 from argus_forge.core import forge_config
 from argus_forge.emitters import TRAINER_INFO
-from argus_forge.jobs import Job, JobRegistry
 from argus_forge.manifest import inspect_export, resolve_export_dir
 from argus_forge.models import (
     ARGUS_ROOT_ENV,
@@ -81,6 +80,7 @@ from argus_forge.models import (
     TrainerInfo,
 )
 from argus_forge.runner import prepare_run
+from argus_forge.server.jobs import Job, JobRegistry
 
 # Browser origins allowed by a bare --cors: the argus-studio dev frontend.
 _LOCALHOST_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The job registry moved to `argus_forge.server.jobs`** (from
+  `argus_forge.jobs`) and its viewer fan-out is now built on `anyio` typed
+  memory object streams instead of a hand-rolled `asyncio.Queue[object]` plus
+  an end-of-stream sentinel (issue #17). Closing the producer's half of a
+  viewer's stream ends its `async for`, so the four-site sentinel protocol —
+  and the unverifiable `assert isinstance(...)` that `python -O` compiled out —
+  are gone. The registry only ever existed to serve the HTTP layer, so it now
+  lives beside it and `anyio` stays out of a CLI-only install; `anyio>=4` is
+  declared explicitly on the `server` extra rather than relied on transitively
+  via starlette. No behaviour change: the bounded, **drop-oldest** subscriber
+  policy (`MAX_SUBSCRIBER_LAG`) is preserved explicitly, since anyio's streams
+  apply backpressure when full and one stalled `/stream` reader must never
+  throttle the trainer's stdout.
+
 ## [0.1.0] - 2026-07-21
 
 First tagged release — the version that publishes `ghcr.io/smk762/argus-forge`

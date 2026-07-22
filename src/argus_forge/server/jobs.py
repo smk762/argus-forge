@@ -11,6 +11,11 @@ cancelled explicitly.
 Scope: in-process and single-server. A server restart forgets in-flight runs
 (and, because the trainer runs in its own session, can leave it running detached
 — see :mod:`argus_forge.runner`); durable run metadata is a follow-up.
+
+This lives under ``server/`` rather than in the core package because the
+registry exists only to serve the HTTP layer, and its fan-out is built on
+``anyio`` — a dependency the ``server`` extra already carries (via starlette)
+but a CLI-only install has no reason to acquire.
 """
 
 from __future__ import annotations
@@ -19,9 +24,18 @@ import asyncio
 import contextlib
 from collections import deque
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import structlog
+from anyio import (
+    BrokenResourceError,
+    ClosedResourceError,
+    EndOfStream,
+    WouldBlock,
+    create_memory_object_stream,
+)
+from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
 from argus_forge.manifest import resolve_export_dir
 from argus_forge.models import RunEvent, RunRequest, RunState, RunStatus
@@ -33,34 +47,63 @@ logger = structlog.get_logger()
 # is bounded; the run's `start` event is retained out-of-band (see Job._start)
 # so command/cwd survive on the stream even past this window.
 MAX_BUFFERED_EVENTS = 2000
-# How far a single /stream viewer may fall behind before its queue starts
+# How far a single /stream viewer may fall behind before its channel starts
 # dropping its oldest un-read events. Bounds the memory one stalled reader can
 # pin, independently of MAX_BUFFERED_EVENTS (which bounds only the shared tail).
 MAX_SUBSCRIBER_LAG = MAX_BUFFERED_EVENTS
 # Finished runs kept in the registry (most-recent-first) before eviction.
 MAX_FINISHED_JOBS = 64
 
-_SENTINEL = object()  # queued to a subscriber to signal end-of-stream
-
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _offer(q: asyncio.Queue[object], item: object) -> None:
-    """Enqueue *item* for a subscriber without ever blocking the producer.
+@dataclass(eq=False)  # identity-keyed, so viewers live in a set
+class _Subscriber:
+    """One viewer's bounded channel onto the job's events.
 
-    A viewer that has fallen ``MAX_SUBSCRIBER_LAG`` events behind (a stalled or
-    half-open /stream reader) drops its oldest un-read event to make room, so
-    one slow consumer can't grow the server's memory without bound. The
-    end-of-stream sentinel is enqueued the same way, so it is never lost.
+    Both halves of the memory object stream are held here: the receive half is
+    the viewer's, but the producer needs it too, to enforce the drop-oldest lag
+    policy that anyio's streams don't provide (see :meth:`offer`).
     """
-    try:
-        q.put_nowait(item)
-    except asyncio.QueueFull:
-        with contextlib.suppress(asyncio.QueueEmpty):
-            q.get_nowait()
-        q.put_nowait(item)
+
+    send: MemoryObjectSendStream[RunEvent]
+    receive: MemoryObjectReceiveStream[RunEvent]
+
+    @classmethod
+    def open(cls) -> _Subscriber:
+        return cls(*create_memory_object_stream[RunEvent](max_buffer_size=MAX_SUBSCRIBER_LAG))
+
+    def offer(self, ev: RunEvent) -> None:
+        """Hand *ev* to this viewer without ever blocking the producer.
+
+        anyio's memory object streams apply backpressure when full — they block,
+        or raise ``WouldBlock`` from ``send_nowait`` — which here would let one
+        stalled /stream reader throttle the trainer's stdout. So a viewer that
+        has fallen ``MAX_SUBSCRIBER_LAG`` events behind (a stalled or half-open
+        reader) drops its own oldest un-read event to make room instead, which
+        bounds the memory one slow consumer can pin.
+
+        Dropping is safe from the producer side: ``WouldBlock`` means the buffer
+        is full and no task is waiting to receive, so nothing is racing us for
+        that oldest item.
+        """
+        try:
+            self.send.send_nowait(ev)
+        except WouldBlock:
+            with contextlib.suppress(WouldBlock, EndOfStream, ClosedResourceError):
+                self.receive.receive_nowait()  # drop the oldest un-read event
+            with contextlib.suppress(WouldBlock, BrokenResourceError, ClosedResourceError):
+                self.send.send_nowait(ev)
+        except (BrokenResourceError, ClosedResourceError):
+            pass  # the viewer went away between its last read and unregistering
+
+    def close(self) -> None:
+        """Close the send half: the viewer's ``async for`` ends once it has
+        drained what is already buffered. This replaces an end-of-stream
+        sentinel, so nothing out-of-band can be dropped by the lag policy."""
+        self.send.close()
 
 
 class Job:
@@ -84,7 +127,7 @@ class Job:
         # The `start` event is retained out-of-band so a viewer reconnecting to a
         # long run still learns command/cwd even after it rolls off `_events`.
         self._start: RunEvent | None = None
-        self._subscribers: set[asyncio.Queue[object]] = set()
+        self._subscribers: set[_Subscriber] = set()
         self._done = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._cancelling = False
@@ -111,37 +154,35 @@ class Job:
         if ev.type == "start":
             self._start = ev
         self._events.append(ev)
-        for q in self._subscribers:
-            _offer(q, ev)
+        for sub in self._subscribers:
+            sub.offer(ev)
 
     async def subscribe(self) -> AsyncIterator[RunEvent]:
         """Yield the buffered backlog, then live events until the run ends.
 
         Snapshot + register happen with no ``await`` between them, so the split
-        between backlog and live queue is atomic — no event is dropped or
+        between backlog and live channel is atomic — no event is dropped or
         duplicated across it. A viewer joining a finished run just replays the
         retained buffer. The `start` event is prepended if it has already rolled
         off the bounded tail, so command/cwd are always the first thing seen.
         """
-        q: asyncio.Queue[object] = asyncio.Queue(maxsize=MAX_SUBSCRIBER_LAG)
+        sub = _Subscriber.open()
         backlog = list(self._events)
         if self._start is not None and self._start not in backlog:
             backlog.insert(0, self._start)
         done = self._done.is_set()
-        self._subscribers.add(q)
+        self._subscribers.add(sub)
         try:
             for ev in backlog:
                 yield ev
             if done:
                 return
-            while True:
-                item = await q.get()
-                if item is _SENTINEL:
-                    return
-                assert isinstance(item, RunEvent)
-                yield item
+            async with sub.receive:
+                async for ev in sub.receive:
+                    yield ev
         finally:
-            self._subscribers.discard(q)
+            self._subscribers.discard(sub)
+            sub.close()  # release the producer's half too, so nothing outlives the viewer
 
     def _finalize(self, status: RunStatus) -> None:
         """Record terminal state exactly once and release every viewer.
@@ -155,8 +196,8 @@ class Job:
         self.status = status
         self.ended_at = _now()
         self._done.set()
-        for q in list(self._subscribers):
-            _offer(q, _SENTINEL)
+        for sub in list(self._subscribers):
+            sub.close()
 
     async def _drive(self) -> None:
         status: RunStatus = "succeeded"  # a run that ends without a terminal event (dry_run) still succeeded

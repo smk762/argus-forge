@@ -13,31 +13,22 @@ Scope: in-process and single-server. A server restart forgets in-flight runs
 — see :mod:`argus_forge.runner`); durable run metadata is a follow-up.
 
 This lives under ``server/`` rather than in the core package because the
-registry exists only to serve the HTTP layer, and its fan-out is built on
-``anyio`` — a dependency the ``server`` extra already carries (via starlette)
-but a CLI-only install has no reason to acquire. It still imports on ``anyio``
-alone: :mod:`argus_forge.server` resolves the FastAPI entry points lazily, so
-importing this module does not drag in fastapi/starlette/argus-cortex with it.
+registry exists only to serve the HTTP layer — a CLI-only install has no reason
+to carry it. It needs nothing from the ``server`` extra, though:
+:mod:`argus_forge.server` resolves the FastAPI entry points lazily, so importing
+this module does not drag in fastapi/starlette/argus-cortex with it. Its fan-out
+is plain stdlib asyncio; the only third-party imports are the package's own base
+dependencies (structlog, and pydantic via :mod:`argus_forge.models`).
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from collections import deque
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import structlog
-from anyio import (
-    BrokenResourceError,
-    ClosedResourceError,
-    EndOfStream,
-    WouldBlock,
-    create_memory_object_stream,
-)
-from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
 from argus_forge.manifest import resolve_export_dir
 from argus_forge.models import RunEvent, RunRequest, RunState, RunStatus
@@ -48,19 +39,17 @@ logger = structlog.get_logger()
 # Recent events retained per run for reconnecting viewers. The tail of the log
 # is bounded; the run's `start` event is retained out-of-band (see Job._start)
 # so command/cwd survive on the stream even past this window.
-MAX_BUFFERED_EVENTS = 2000
-# How far a single /stream viewer may fall behind before its channel starts
-# dropping its oldest un-read events. Bounds the memory one stalled reader can
-# pin, independently of MAX_BUFFERED_EVENTS (which bounds only the shared tail) —
-# so it is its own literal, not an alias, and the two can be tuned apart.
 #
-# Must be >= 1, and note the trap if you tune it: `asyncio.Queue(maxsize=0)` meant
-# *unbounded*, but a memory object stream with `max_buffer_size=0` buffers nothing
-# at all, so `offer()` would silently drop every event and /stream would return an
-# empty body for a live run. The two spellings mean opposite things at 0.
-MAX_SUBSCRIBER_LAG = 2000
-if MAX_SUBSCRIBER_LAG < 1:  # pragma: no cover - guards a mis-tune, not a runtime path
-    raise ValueError("MAX_SUBSCRIBER_LAG must be >= 1: 0 buffers nothing and drops every event")
+# Every viewer reads out of this one deque through a cursor (see _Viewer), so N
+# attached /stream readers — however far behind — cost N cursors, not N copies of
+# the window. It bounds one job: the registry retains MAX_FINISHED_JOBS finished
+# ones, each with a window of its own.
+MAX_BUFFERED_EVENTS = 2000
+if MAX_BUFFERED_EVENTS < 1:  # pragma: no cover - guards a mis-tune, not a runtime path
+    # A zero-length deque accepts every append and keeps none, so `_published`
+    # would run away from a window that is always empty and a cursor clamped to
+    # its floor would index off the end. Tune the window, never to nothing.
+    raise ValueError("MAX_BUFFERED_EVENTS must be >= 1: a zero-length window leaves a cursor nothing to read")
 # Finished runs kept in the registry (most-recent-first) before eviction.
 MAX_FINISHED_JOBS = 64
 
@@ -69,56 +58,34 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-@dataclass(eq=False)  # identity-keyed, so viewers live in a set
-class _Subscriber:
-    """One viewer's bounded channel onto the job's events.
+class _Viewer:
+    """One viewer's position in the job's shared event buffer, plus a wakeup.
 
-    Both halves of the memory object stream are held here: the receive half is
-    the viewer's, but the producer needs it too, to enforce the drop-oldest lag
-    policy that anyio's streams don't provide (see :meth:`offer`).
+    ``pos`` is an *absolute* sequence number, not a deque index: the job counts
+    every event it ever published (``Job._published``), so the retained window is
+    ``[_published - len(_events), _published)``. A viewer that falls further
+    behind than the window simply finds its ``pos`` below that floor and resumes
+    at the oldest retained event — the drop is a consequence of the one shared
+    bound, not a second eviction policy running per viewer.
+
+    ``sent_start`` tracks whether this viewer has been handed the run's `start`
+    event yet, so the out-of-band copy (``Job._start``) can be injected exactly
+    once, whenever the cursor turns out to be past the sequence it occupied.
+
+    Identity-keyed (no ``__eq__``), so viewers live in a set.
     """
 
-    send: MemoryObjectSendStream[RunEvent]
-    receive: MemoryObjectReceiveStream[RunEvent]
+    __slots__ = ("pos", "sent_start", "wakeup")
 
-    @classmethod
-    def open(cls) -> _Subscriber:
-        return cls(*create_memory_object_stream[RunEvent](max_buffer_size=MAX_SUBSCRIBER_LAG))
-
-    def offer(self, ev: RunEvent) -> None:
-        """Hand *ev* to this viewer without ever blocking the producer.
-
-        anyio's memory object streams apply backpressure when full — they block,
-        or raise ``WouldBlock`` from ``send_nowait`` — which here would let one
-        stalled /stream reader throttle the trainer's stdout. So a viewer that
-        has fallen ``MAX_SUBSCRIBER_LAG`` events behind (a stalled or half-open
-        reader) drops its own oldest un-read event to make room instead, which
-        bounds the memory one slow consumer can pin.
-
-        Dropping is safe from the producer side: ``WouldBlock`` means the buffer
-        is full and no task is waiting to receive, so nothing is racing us for
-        that oldest item.
-        """
-        try:
-            self.send.send_nowait(ev)
-        except WouldBlock:
-            with contextlib.suppress(WouldBlock, EndOfStream, ClosedResourceError):
-                self.receive.receive_nowait()  # drop the oldest un-read event
-            with contextlib.suppress(WouldBlock, BrokenResourceError, ClosedResourceError):
-                self.send.send_nowait(ev)
-        except (BrokenResourceError, ClosedResourceError):
-            pass  # the viewer went away between its last read and unregistering
-
-    def close(self) -> None:
-        """Close the send half: the viewer's ``async for`` ends once it has
-        drained what is already buffered. This replaces an end-of-stream
-        sentinel, so nothing out-of-band can be dropped by the lag policy."""
-        self.send.close()
+    def __init__(self, pos: int) -> None:
+        self.pos = pos
+        self.sent_start = False
+        self.wakeup = asyncio.Event()
 
 
 class Job:
     """One training run: the background task driving it, a bounded event buffer,
-    and the set of live subscribers to broadcast to."""
+    and the set of viewers whose cursors read out of that buffer."""
 
     def __init__(self, run_id: str, req: RunRequest, command: list[str], cwd: str) -> None:
         self.run_id = run_id
@@ -134,10 +101,16 @@ class Job:
         self.started_at = _now()
         self.ended_at: str | None = None
         self._events: deque[RunEvent] = deque(maxlen=MAX_BUFFERED_EVENTS)
+        # Count of every event ever published, so a viewer's cursor can be an
+        # absolute sequence number that survives eviction from `_events`.
+        self._published = 0
         # The `start` event is retained out-of-band so a viewer reconnecting to a
         # long run still learns command/cwd even after it rolls off `_events`.
+        # Its sequence number goes with it: that — not `start` happening to be
+        # the head of the deque — is what tells a cursor whether it is past it.
         self._start: RunEvent | None = None
-        self._subscribers: set[_Subscriber] = set()
+        self._start_seq = -1
+        self._subscribers: set[_Viewer] = set()
         self._done = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._cancelling = False
@@ -160,55 +133,84 @@ class Job:
             message=self.message,
         )
 
+    @property
+    def _oldest_seq(self) -> int:
+        """Sequence number of the oldest event still retained.
+
+        The window is ``[_oldest_seq, _published)``. This holds only while
+        `_published` counts exactly the appends to `_events`, which is why both
+        live in `_publish` and nothing else may touch `_events`.
+        """
+        return self._published - len(self._events)
+
     def _publish(self, ev: RunEvent) -> None:
         if ev.type == "start":
             self._start = ev
-        self._events.append(ev)
-        for sub in self._subscribers:
-            sub.offer(ev)
+            self._start_seq = self._published
+        self._events.append(ev)  # bounded: the deque evicts its own oldest
+        self._published += 1
+        for viewer in self._subscribers:
+            viewer.wakeup.set()
 
     async def subscribe(self) -> AsyncIterator[RunEvent]:
-        """Yield the buffered backlog, then live events until the run ends.
+        """Yield the run's retained events, then live ones until it ends.
 
-        Snapshot + register happen with no ``await`` between them, so the split
-        between backlog and live channel is atomic — no event is dropped or
-        duplicated across it. A viewer joining a finished run just replays the
-        retained buffer. The `start` event is prepended if it has already rolled
-        off the bounded tail, so command/cwd are always the first thing seen.
+        The viewer is a cursor into the job's single bounded buffer, so there is
+        no backlog/live split to keep consistent: it reads forward from wherever
+        it starts, and "live" just means it caught up with the head and parked on
+        its wakeup. Nothing can be reordered, duplicated or lost across a
+        boundary that no longer exists, and a viewer that never reads pins one
+        cursor rather than its own copy of the window. A viewer that falls
+        further behind than the window resumes at its tail — the drop is a
+        consequence of the one shared bound, not a second eviction policy.
+
+        A viewer joining a finished run just replays what is retained. The
+        `start` event is injected from its out-of-band copy the moment the cursor
+        is found to be past the sequence it occupied — whether it rolled off the
+        tail or the cursor was clamped over it — so command/cwd are always the
+        first thing seen, exactly once.
         """
-        backlog = list(self._events)
-        # `_start` is the first event ever appended, so while it is still inside
-        # the bounded tail it is at index 0. An identity check on the head is
-        # exact and O(1); `self._start not in backlog` ran RunEvent.__eq__ over
-        # the whole 2000-event window — ~2 ms of event-loop time per subscribe,
-        # and only on long runs, which is exactly when reconnects happen.
-        if self._start is not None and (not backlog or backlog[0] is not self._start):
-            backlog.insert(0, self._start)
-
-        if self._done.is_set():
-            # Finished: the retained buffer is the whole story. Return before
-            # opening a channel at all — registering one here would allocate a
-            # stream pair nothing can ever publish to, and abandon its receive
-            # half unclosed.
-            for ev in backlog:
-                yield ev
-            return
-
-        sub = _Subscriber.open()
-        self._subscribers.add(sub)  # still no await since the snapshot above
+        viewer = _Viewer(self._oldest_seq)
+        # Registering on a finished run would strand the cursor: `_finalize` is
+        # idempotent, so the sweep that drops half-open readers has already run
+        # and can never run again. There is nothing to register for either —
+        # nothing publishes after `_done` is set. No await between the read above
+        # and this decision, so `finished` cannot change under us.
+        if not self.finished:
+            self._subscribers.add(viewer)
         try:
-            # `with sub.receive` wraps the whole body, not just the live loop, so
-            # the viewer's half is closed on *every* exit — including a client
-            # disconnecting part-way through the backlog, which unwinds before
-            # the live loop is ever reached.
-            with sub.receive:
-                for ev in backlog:
-                    yield ev
-                async for ev in sub.receive:
-                    yield ev
+            while True:
+                # Clear *before* reading anything: a publish landing after this
+                # point re-sets the wakeup, so the park below returns at once
+                # rather than sleeping through an event we haven't seen.
+                viewer.wakeup.clear()
+                # Read `finished` before draining, not after: everything
+                # published by a finished run is already in the buffer, so a
+                # drain that starts after this read cannot miss a later event.
+                # This read is also what ends a viewer that `_finalize` woke and
+                # unregistered — *not* the wakeup it set, which the clear above
+                # has already discarded. Keep the two in this order.
+                done = self.finished
+                while viewer.pos < self._published:
+                    oldest = self._oldest_seq
+                    if viewer.pos < oldest:
+                        viewer.pos = oldest  # fell out of the shared window; resume at its tail
+                    if not viewer.sent_start and self._start is not None and viewer.pos > self._start_seq:
+                        # The cursor is past `start`: it rolled off the window, or
+                        # the clamp above stepped over it. Hand over the retained
+                        # copy without moving the cursor, so nothing else is lost.
+                        viewer.sent_start = True
+                        yield self._start
+                        continue
+                    ev = self._events[viewer.pos - oldest]
+                    viewer.pos += 1
+                    viewer.sent_start = viewer.sent_start or ev is self._start
+                    yield ev  # suspends here; the cursor is what keeps our place
+                if done:
+                    return
+                await viewer.wakeup.wait()
         finally:
-            self._subscribers.discard(sub)
-            sub.close()  # release the producer's half too, so nothing outlives the viewer
+            self._subscribers.discard(viewer)  # a no-op if we never registered
 
     def _finalize(self, status: RunStatus) -> None:
         """Record terminal state exactly once and release every viewer.
@@ -222,14 +224,21 @@ class Job:
         self.status = status
         self.ended_at = _now()
         self._done.set()
-        for sub in list(self._subscribers):
-            sub.close()
-        # Drop them too. A viewer whose generator is never resumed again — a
-        # half-open /stream reader, the very case MAX_SUBSCRIBER_LAG exists for —
-        # never runs subscribe()'s finally, so without this it keeps its closed
-        # channel and up to MAX_SUBSCRIBER_LAG buffered events pinned to this
-        # finished job for as long as the registry retains it (MAX_FINISHED_JOBS).
-        # subscribe()'s own discard is a harmless no-op afterwards.
+        # Wake every viewer: each one drains what is left in the buffer, sees the
+        # `finished` it read on its next pass, and ends its own iteration.
+        for viewer in self._subscribers:
+            viewer.wakeup.set()
+        # Then drop them. A viewer whose generator is never resumed again — a
+        # half-open /stream reader — never runs subscribe()'s finally, so without
+        # this its cursor stays registered for as long as the registry retains
+        # the finished job (MAX_FINISHED_JOBS). subscribe()'s own discard is then
+        # a no-op.
+        #
+        # Unregistering can't strand a viewer, but *not* because the wakeup set
+        # above survives — subscribe() clears it at the top of its next pass.
+        # What ends the viewer is that the same pass re-reads `finished` before
+        # draining and returns on it. That ordering is the load-bearing one; the
+        # wakeup only ensures a parked viewer gets a pass at all.
         self._subscribers.clear()
 
     async def _drive(self) -> None:

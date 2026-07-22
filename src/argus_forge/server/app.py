@@ -9,7 +9,7 @@ Routes:
     POST /run              -> RunState        (start a background run, return its id)
     GET  /runs             -> list[RunState]  (registry of tracked runs)
     GET  /run/{id}         -> RunState        (status; poll for terminal result)
-    GET  /run/{id}/stream  -> NDJSON stream   (attach: backlog + live events)
+    GET  /run/{id}/stream  -> NDJSON stream   (attach: retained + live events)
     POST /run/{id}/cancel  -> RunState        (stop the run's process group)
 
 Config generation is filesystem work on the shared dataset volume, and a
@@ -164,7 +164,7 @@ async def _ndjson(events: AsyncIterator[RunEvent]) -> AsyncIterator[str]:
 
 
 def _stream(job: Job) -> NDJSONResponse:
-    """An NDJSON view of *job* — backlog then live events — tagged with its run id."""
+    """An NDJSON view of *job* — retained events, then live ones — tagged with its run id."""
     return NDJSONResponse(_ndjson(job.subscribe()), headers={"X-Training-Run-Id": job.run_id})
 
 

@@ -14,9 +14,11 @@ Scope: in-process and single-server. A server restart forgets in-flight runs
 
 This lives under ``server/`` rather than in the core package because the
 registry exists only to serve the HTTP layer — a CLI-only install has no reason
-to carry it. It stays importable on the standard library alone:
+to carry it. It needs nothing from the ``server`` extra, though:
 :mod:`argus_forge.server` resolves the FastAPI entry points lazily, so importing
-this module does not drag in fastapi/starlette/argus-cortex with it.
+this module does not drag in fastapi/starlette/argus-cortex with it. Its fan-out
+is plain stdlib asyncio; the only third-party imports are the package's own base
+dependencies (structlog, and pydantic via :mod:`argus_forge.models`).
 """
 
 from __future__ import annotations
@@ -38,10 +40,16 @@ logger = structlog.get_logger()
 # is bounded; the run's `start` event is retained out-of-band (see Job._start)
 # so command/cwd survive on the stream even past this window.
 #
-# This is the *whole* retention story: every viewer reads out of this one deque
-# through a cursor (see _Viewer), so N attached /stream readers — however far
-# behind — cost N cursors, not N copies of the window.
+# Every viewer reads out of this one deque through a cursor (see _Viewer), so N
+# attached /stream readers — however far behind — cost N cursors, not N copies of
+# the window. It bounds one job: the registry retains MAX_FINISHED_JOBS finished
+# ones, each with a window of its own.
 MAX_BUFFERED_EVENTS = 2000
+if MAX_BUFFERED_EVENTS < 1:  # pragma: no cover - guards a mis-tune, not a runtime path
+    # A zero-length deque accepts every append and keeps none, so `_published`
+    # would run away from a window that is always empty and a cursor clamped to
+    # its floor would index off the end. Tune the window, never to nothing.
+    raise ValueError("MAX_BUFFERED_EVENTS must be >= 1: a zero-length window leaves a cursor nothing to read")
 # Finished runs kept in the registry (most-recent-first) before eviction.
 MAX_FINISHED_JOBS = 64
 
@@ -60,19 +68,24 @@ class _Viewer:
     at the oldest retained event — the drop is a consequence of the one shared
     bound, not a second eviction policy running per viewer.
 
+    ``sent_start`` tracks whether this viewer has been handed the run's `start`
+    event yet, so the out-of-band copy (``Job._start``) can be injected exactly
+    once, whenever the cursor turns out to be past the sequence it occupied.
+
     Identity-keyed (no ``__eq__``), so viewers live in a set.
     """
 
-    __slots__ = ("pos", "wakeup")
+    __slots__ = ("pos", "sent_start", "wakeup")
 
     def __init__(self, pos: int) -> None:
         self.pos = pos
+        self.sent_start = False
         self.wakeup = asyncio.Event()
 
 
 class Job:
     """One training run: the background task driving it, a bounded event buffer,
-    and the set of live subscribers to broadcast to."""
+    and the set of viewers whose cursors read out of that buffer."""
 
     def __init__(self, run_id: str, req: RunRequest, command: list[str], cwd: str) -> None:
         self.run_id = run_id
@@ -93,7 +106,10 @@ class Job:
         self._published = 0
         # The `start` event is retained out-of-band so a viewer reconnecting to a
         # long run still learns command/cwd even after it rolls off `_events`.
+        # Its sequence number goes with it: that — not `start` happening to be
+        # the head of the deque — is what tells a cursor whether it is past it.
         self._start: RunEvent | None = None
+        self._start_seq = -1
         self._subscribers: set[_Viewer] = set()
         self._done = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
@@ -117,61 +133,84 @@ class Job:
             message=self.message,
         )
 
+    @property
+    def _oldest_seq(self) -> int:
+        """Sequence number of the oldest event still retained.
+
+        The window is ``[_oldest_seq, _published)``. This holds only while
+        `_published` counts exactly the appends to `_events`, which is why both
+        live in `_publish` and nothing else may touch `_events`.
+        """
+        return self._published - len(self._events)
+
     def _publish(self, ev: RunEvent) -> None:
         if ev.type == "start":
             self._start = ev
+            self._start_seq = self._published
         self._events.append(ev)  # bounded: the deque evicts its own oldest
         self._published += 1
         for viewer in self._subscribers:
             viewer.wakeup.set()
 
     async def subscribe(self) -> AsyncIterator[RunEvent]:
-        """Yield the retained backlog, then live events until the run ends.
+        """Yield the run's retained events, then live ones until it ends.
 
         The viewer is a cursor into the job's single bounded buffer, so there is
         no backlog/live split to keep consistent: it reads forward from wherever
         it starts, and "live" just means it caught up with the head and parked on
         its wakeup. Nothing can be reordered, duplicated or lost across a
         boundary that no longer exists, and a viewer that never reads pins one
-        cursor rather than its own copy of the window.
+        cursor rather than its own copy of the window. A viewer that falls
+        further behind than the window resumes at its tail — the drop is a
+        consequence of the one shared bound, not a second eviction policy.
 
-        A viewer joining a finished run just replays the retained buffer. The
-        `start` event is prepended if it has already rolled off the bounded tail,
-        so command/cwd are always the first thing seen.
+        A viewer joining a finished run just replays what is retained. The
+        `start` event is injected from its out-of-band copy the moment the cursor
+        is found to be past the sequence it occupied — whether it rolled off the
+        tail or the cursor was clamped over it — so command/cwd are always the
+        first thing seen, exactly once.
         """
-        viewer = _Viewer(self._published - len(self._events))
-        # `_start` is the first event ever appended, so while it is still inside
-        # the bounded tail it is at index 0. An identity check on the head is
-        # exact and O(1); `self._start not in backlog` ran RunEvent.__eq__ over
-        # the whole 2000-event window — ~2 ms of event-loop time per subscribe,
-        # and only on long runs, which is exactly when reconnects happen.
-        start = self._start
-        rolled_off = start if start is not None and (not self._events or self._events[0] is not start) else None
-        self._subscribers.add(viewer)  # still no await since the snapshot above
+        viewer = _Viewer(self._oldest_seq)
+        # Registering on a finished run would strand the cursor: `_finalize` is
+        # idempotent, so the sweep that drops half-open readers has already run
+        # and can never run again. There is nothing to register for either —
+        # nothing publishes after `_done` is set. No await between the read above
+        # and this decision, so `finished` cannot change under us.
+        if not self.finished:
+            self._subscribers.add(viewer)
         try:
-            if rolled_off is not None:
-                yield rolled_off
             while True:
                 # Clear *before* reading anything: a publish landing after this
                 # point re-sets the wakeup, so the park below returns at once
                 # rather than sleeping through an event we haven't seen.
                 viewer.wakeup.clear()
-                # Likewise read `finished` before draining, not after: everything
+                # Read `finished` before draining, not after: everything
                 # published by a finished run is already in the buffer, so a
                 # drain that starts after this read cannot miss a later event.
+                # This read is also what ends a viewer that `_finalize` woke and
+                # unregistered — *not* the wakeup it set, which the clear above
+                # has already discarded. Keep the two in this order.
                 done = self.finished
                 while viewer.pos < self._published:
-                    oldest = self._published - len(self._events)
+                    oldest = self._oldest_seq
                     if viewer.pos < oldest:
                         viewer.pos = oldest  # fell out of the shared window; resume at its tail
+                    if not viewer.sent_start and self._start is not None and viewer.pos > self._start_seq:
+                        # The cursor is past `start`: it rolled off the window, or
+                        # the clamp above stepped over it. Hand over the retained
+                        # copy without moving the cursor, so nothing else is lost.
+                        viewer.sent_start = True
+                        yield self._start
+                        continue
                     ev = self._events[viewer.pos - oldest]
                     viewer.pos += 1
+                    viewer.sent_start = viewer.sent_start or ev is self._start
                     yield ev  # suspends here; the cursor is what keeps our place
                 if done:
                     return
                 await viewer.wakeup.wait()
         finally:
-            self._subscribers.discard(viewer)
+            self._subscribers.discard(viewer)  # a no-op if we never registered
 
     def _finalize(self, status: RunStatus) -> None:
         """Record terminal state exactly once and release every viewer.
@@ -187,14 +226,19 @@ class Job:
         self._done.set()
         # Wake every viewer: each one drains what is left in the buffer, sees the
         # `finished` it read on its next pass, and ends its own iteration.
-        for viewer in list(self._subscribers):
+        for viewer in self._subscribers:
             viewer.wakeup.set()
         # Then drop them. A viewer whose generator is never resumed again — a
         # half-open /stream reader — never runs subscribe()'s finally, so without
         # this its cursor stays registered for as long as the registry retains
-        # the finished job (MAX_FINISHED_JOBS). Unregistering can't strand it:
-        # nothing publishes after _done is set, and its wakeup is already set, so
-        # it can never park again. subscribe()'s own discard is then a no-op.
+        # the finished job (MAX_FINISHED_JOBS). subscribe()'s own discard is then
+        # a no-op.
+        #
+        # Unregistering can't strand a viewer, but *not* because the wakeup set
+        # above survives — subscribe() clears it at the top of its next pass.
+        # What ends the viewer is that the same pass re-reads `finished` before
+        # draining and returns on it. That ordering is the load-bearing one; the
+        # wakeup only ensures a parked viewer gets a pass at all.
         self._subscribers.clear()
 
     async def _drive(self) -> None:

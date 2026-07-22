@@ -24,23 +24,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stalled readers pinned N copies of it (~1 MB each) on top of the shared tail.
   Total retention is now `MAX_BUFFERED_EVENTS` objects regardless of how many
   viewers are attached; a viewer costs a sequence number and an `asyncio.Event`.
-  - Drop-oldest for a lagging viewer is unchanged in effect but is now a
-    *consequence* of the one shared bound: a cursor that falls behind the window
-    resumes at the oldest retained event. `MAX_SUBSCRIBER_LAG` is gone, and with
-    it the second eviction policy, the `max_buffer_size=0` trap, and the
-    backlog/live split in `subscribe()` — a cursor cannot straddle a seam, so
-    "no event dropped or duplicated across it" is structural rather than an
-    invariant a comment had to assert.
+  - Drop-oldest for a lagging viewer is now a *consequence* of the one shared
+    bound: a cursor that falls behind the window resumes at the oldest retained
+    event. `MAX_SUBSCRIBER_LAG` is gone, and with it the second eviction policy
+    and the backlog/live split in `subscribe()` — a cursor cannot straddle a
+    seam, so "no event dropped or duplicated across it" is structural rather
+    than an invariant a comment had to assert. One behaviour did narrow: a
+    viewer *stalled part-way through its replay* used to be immune to eviction
+    (the replay was a private list copy) and had a second 2000-event channel
+    behind it, so its worst-case tolerance was ~4000 events; it is now the one
+    2000-event window. A viewer that has caught up is unaffected.
   - `_publish` still never waits on a viewer, so one stalled `/stream` reader
     cannot apply backpressure to the trainer's stdout. The wire format is
     unchanged: `GET /run/{id}/stream` emits byte-for-byte what it did.
+  - The `start` event is still retained out-of-band, but keyed on the sequence
+    number it occupied rather than on it being the head of the buffer, and it is
+    injected the moment a cursor is found to be past it. So a viewer whose
+    cursor is *clamped over* `start` — not only one that joined after it rolled
+    off — still learns command/cwd, and a viewer can never be handed it twice.
   - The registry only ever existed to serve the HTTP layer, so it now lives
-    beside it at `argus_forge.server.jobs`. It is pure-stdlib asyncio again —
-    the `anyio` dependency the fan-out briefly took on (and the explicit
+    beside it at `argus_forge.server.jobs`. The fan-out is plain stdlib asyncio
+    again — the `anyio` dependency it briefly took on (and the explicit
     `anyio>=4` on the `server` extra) is gone, as is the end-of-stream sentinel
     and its unverifiable `assert isinstance(...)` that `python -O` compiled out.
     `argus_forge.server` resolves its FastAPI entry points lazily, so the
     registry imports without dragging in fastapi/starlette/argus-cortex.
+
+### Fixed
+
+- `subscribe()` no longer registers a cursor on a run that has **already
+  finished**. `_finalize` is idempotent, so the sweep that drops half-open
+  `/stream` readers has run for the last time by then and could never drop it —
+  a client that reconnects to a finished run and stalls mid-replay would pin its
+  cursor for as long as the registry retained the job (`MAX_FINISHED_JOBS`).
+  Nothing can publish to such a viewer anyway, so it registers nothing.
+- `MAX_BUFFERED_EVENTS` is validated as `>= 1` at import, replacing the guard
+  that went with `MAX_SUBSCRIBER_LAG`. A zero-length window is a worse mis-tune
+  under a cursor than under a queue: the deque keeps nothing while `_published`
+  runs away from it, so a clamped cursor indexes off the end and `/stream`
+  raises `IndexError` mid-response instead of merely returning an empty body.
 
 ### Fixed
 

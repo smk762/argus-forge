@@ -12,11 +12,11 @@ def __getattr__(name: str) -> Any:
     """Resolve the FastAPI entry points lazily.
 
     Importing :mod:`argus_forge.server.app` here eagerly would mean that
-    ``import argus_forge.server.jobs`` — which needs only the standard library —
-    first pulled in fastapi, starlette and argus-cortex, since importing a
-    submodule runs its package's ``__init__`` first. That is the coupling putting
-    the registry under ``server/`` was meant to avoid, and it made the registry's
-    HTTP-free unit tests unrunnable on an install without the ``server`` extra.
+    ``import argus_forge.server.jobs`` — which needs nothing from the ``server``
+    extra — first pulled in fastapi, starlette and argus-cortex, since importing
+    a submodule runs its package's ``__init__`` first. That is the coupling
+    putting the registry under ``server/`` was meant to avoid, and it made the
+    registry's HTTP-free unit tests unrunnable on an install without that extra.
     """
     if name in __all__:
         from argus_forge.server import app

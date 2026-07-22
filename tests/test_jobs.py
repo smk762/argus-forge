@@ -13,7 +13,7 @@ import os
 import shutil
 import subprocess
 import weakref
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from pathlib import Path
 
 import pytest
@@ -37,16 +37,21 @@ async def _drain(job: Job) -> list[RunEvent]:
     return [ev async for ev in job.subscribe()]
 
 
-async def _attach(job: Job) -> AsyncIterator[RunEvent]:
-    """Start a viewer and leave it parked, having read nothing.
+async def _attach(job: Job, label: str = "attached") -> AsyncGenerator[RunEvent, None]:
+    """Register a viewer and drive it up to the head of the buffer.
 
     ``subscribe`` is an async generator: its body — and so the cursor's
-    registration — doesn't run until the first ``__anext__``. These tests need a
-    *registered* viewer, so drive it once against a pre-published event.
+    registration — doesn't run until the first ``__anext__``. So publish a
+    uniquely-labelled event and pull until this viewer has seen *that* event,
+    which leaves it registered and caught up, so its next pull genuinely parks.
+    A cursor starts at the window's floor, not at the head, so a second viewer
+    replays what is retained before reaching its own label — pass distinct
+    labels when attaching several, or the wait below ends on the wrong event.
     """
-    job._publish(RunEvent(run_id=job.run_id, type="log", message="attached"))
+    job._publish(RunEvent(run_id=job.run_id, type="log", message=label))
     viewer = job.subscribe()
-    assert (await viewer.__anext__()).message == "attached"
+    while (await viewer.__anext__()).message != label:
+        pass
     assert job._subscribers, "viewer never registered"
     return viewer
 
@@ -140,26 +145,147 @@ async def test_total_retention_is_the_shared_window_not_per_viewer(tmp_path: Pat
     """The property the per-viewer-channel design could not satisfy: N stalled
     viewers must pin the *same* bounded window, not N copies of it. Asserted on
     live objects, since that is the memory claim — each viewer holds a cursor,
-    and the only strong references to events are the job's own deque."""
+    and the only strong references to events are the job's own deque.
+
+    Each viewer joins a run that is *already* at a full window, at a different
+    point, and then the window is rolled past every join point. That staggering
+    is what gives the test teeth: attach them all while the buffer holds one
+    event and every design looks identical, because a per-viewer queue then holds
+    references to the same objects the shared deque does rather than a generation
+    of its own. Reverting to that design must fail here, at ~6x the window.
+    """
     job = _job(tmp_path, "echo hi\n")
-    viewers = [await _attach(job) for _ in range(5)]
-    assert len(job._subscribers) == 5
-
     alive: list[weakref.ref[RunEvent]] = []
-    for i in range(MAX_BUFFERED_EVENTS * 3):
-        ev = RunEvent(run_id=job.run_id, type="log", message=f"line{i}")
-        alive.append(weakref.ref(ev))
-        job._publish(ev)
-    del ev
-    gc.collect()
 
-    retained = sum(ref() is not None for ref in alive)
-    assert retained <= MAX_BUFFERED_EVENTS  # not 5 x MAX_BUFFERED_EVENTS
-    assert retained == len(job._events)
+    def publish_a_full_window(tag: str) -> None:
+        # In a function so the loop variable can't outlive it and keep an event
+        # alive past the collect below.
+        for i in range(MAX_BUFFERED_EVENTS):
+            ev = RunEvent(run_id=job.run_id, type="log", message=f"{tag}{i}")
+            alive.append(weakref.ref(ev))
+            job._publish(ev)
+
+    viewers: list[AsyncGenerator[RunEvent, None]] = []
+    try:
+        for k in range(5):
+            publish_a_full_window(f"gen{k}_")
+            viewers.append(await _attach(job, f"attached{k}"))
+        assert len(job._subscribers) == 5
+        publish_a_full_window("final_")  # roll the window past every join point
+        gc.collect()
+
+        retained = sum(ref() is not None for ref in alive)
+        # Not 6 x MAX_BUFFERED_EVENTS, which is what one generation per viewer
+        # plus the shared tail would cost. Each parked viewer holds only the
+        # event it is suspended on, and those are the untracked `attached*` ones.
+        assert retained <= MAX_BUFFERED_EVENTS
+        assert retained == len(job._events)
+    finally:
+        # In a finally: an assertion above must not also leak five suspended
+        # generators into loop teardown, on top of the failure being reported.
+        job._finalize("succeeded")
+        for viewer in viewers:
+            await viewer.aclose()
+
+
+async def test_a_parked_viewer_is_woken_by_the_next_publish(tmp_path: Path) -> None:
+    """A viewer that has caught up parks on its wakeup, and `_publish` must wake
+    it — every attached viewer, not just one. Without that, a live /stream reader
+    receives nothing until the run ends, so this asserts the event arrives *while
+    the job is still running* rather than being flushed out by `_finalize`."""
+    job = _job(tmp_path, "echo hi\n")
+    viewers = [await _attach(job, f"attached{k}") for k in range(3)]
+    # Each `_attach` publishes, so the earlier viewers are behind again by the
+    # time the last one is up. One marker brings every cursor to the head.
+    job._publish(RunEvent(run_id=job.run_id, type="log", message="sync"))
+    for v in viewers:
+        while (await v.__anext__()).message != "sync":
+            pass
+
+    pending = [asyncio.ensure_future(v.__anext__()) for v in viewers]
+    for _ in range(100):  # let every viewer reach `await viewer.wakeup.wait()`
+        await asyncio.sleep(0)
+    assert not any(p.done() for p in pending), "viewers should be parked, not holding a buffered event"
+
+    job._publish(RunEvent(run_id=job.run_id, type="log", message="live"))
+    try:
+        for p in pending:
+            assert (await asyncio.wait_for(p, timeout=2)).message == "live"
+        assert not job.finished  # delivered live, not flushed by the finalize below
+    finally:
+        job._finalize("succeeded")
+        for viewer in viewers:
+            await viewer.aclose()
+
+
+async def test_finalize_releases_every_viewer_without_resuming_it(tmp_path: Path) -> None:
+    """`_finalize` must both wake its viewers and drop them, and the two cover
+    different readers.
+
+    Waking is what lets a *parked* reader end its own iteration instead of
+    hanging on a run that will never publish again. Dropping is for the reader
+    that never resumes at all — a half-open connection — whose generator never
+    runs `subscribe()`'s cleanup; `_finalize` is idempotent, so if it doesn't
+    unregister that cursor here, nothing ever will.
+    """
+    job = _job(tmp_path, "echo hi\n")
+    half_open = await _attach(job, "half-open")  # registered, then never resumed
+    parked = await _attach(job, "parked")  # caught up, so its next pull parks
+    seen: list[RunEvent] = []
+
+    async def watch() -> None:
+        async for ev in parked:
+            seen.append(ev)
+
+    task = asyncio.create_task(watch())
+    for _ in range(100):
+        await asyncio.sleep(0)
+    assert not task.done(), "viewer should be parked on its wakeup"
+    assert len(job._subscribers) == 2
 
     job._finalize("succeeded")
-    for viewer in viewers:
-        await viewer.aclose()
+    await asyncio.wait_for(task, timeout=2)  # the wakeup is what ends it
+    assert not job._subscribers, "a viewer that never resumed is still registered"
+    await half_open.aclose()
+
+
+async def test_start_survives_a_cursor_clamped_past_it(tmp_path: Path) -> None:
+    """`start` carries command/cwd, so a viewer must see it even when its cursor
+    is clamped forward over the position `start` held. A viewer registered before
+    the run produced anything is the sharp case: it has no retained event to
+    anchor on, and `_drive` can publish a whole window in one synchronous burst
+    (nothing awaits between the lines of a single stdout read)."""
+    job = _job(tmp_path, "echo hi\n")
+    viewer = job.subscribe()
+    first = asyncio.ensure_future(viewer.__anext__())
+    for _ in range(100):
+        if job._subscribers:
+            break
+        await asyncio.sleep(0)
+    assert job._subscribers, "viewer never registered"
+
+    job._publish(RunEvent(run_id=job.run_id, type="start", command=["bash", "train.sh"], cwd="/tmp"))
+    for i in range(MAX_BUFFERED_EVENTS + 50):  # burst the cursor out of the window
+        job._publish(RunEvent(run_id=job.run_id, type="log", message=f"line{i}"))
+    job._finalize("succeeded")
+
+    assert (await asyncio.wait_for(first, timeout=2)).command == ["bash", "train.sh"]
+    rest = [ev async for ev in viewer]
+    assert [ev.type for ev in rest].count("start") == 0  # injected once, not twice
+
+
+async def test_start_is_not_duplicated_when_it_is_not_the_head(tmp_path: Path) -> None:
+    """The retained `start` is keyed on the sequence it occupied, not on it
+    happening to be the first thing in the buffer — otherwise any event published
+    ahead of it makes every viewer see the run start twice."""
+    job = _job(tmp_path, "echo hi\n")
+    job._publish(RunEvent(run_id=job.run_id, type="log", message="pre"))
+    job._publish(RunEvent(run_id=job.run_id, type="start", command=["bash"], cwd="/tmp"))
+    job._publish(RunEvent(run_id=job.run_id, type="log", message="post"))
+    job._finalize("succeeded")
+
+    events = await asyncio.wait_for(_drain(job), timeout=2)
+    assert [ev.type for ev in events] == ["log", "start", "log"]
 
 
 async def test_replaying_a_finished_run_registers_nothing_lasting(tmp_path: Path) -> None:
@@ -175,6 +301,15 @@ async def test_replaying_a_finished_run_registers_nothing_lasting(tmp_path: Path
     assert replayed and replayed[0].type == "start"
     assert replayed[-1].type == "exit"
     assert not job._subscribers
+
+    # And a client that gives up part-way must leave nothing behind either. This
+    # is the half-open reader `_finalize`'s sweep exists for — but `_finalize` is
+    # idempotent and has already run, so a cursor registered here would never be
+    # dropped. Nothing can publish to it, so subscribe() must not register one.
+    partial = job.subscribe()
+    assert (await partial.__anext__()).type == "start"
+    assert not job._subscribers
+    await partial.aclose()
 
 
 async def test_a_late_viewer_sees_every_event_exactly_once(tmp_path: Path) -> None:
@@ -196,8 +331,9 @@ async def test_a_late_viewer_sees_every_event_exactly_once(tmp_path: Path) -> No
 
 async def test_live_viewer_sees_progress_then_ends_at_finalize(tmp_path: Path) -> None:
     """A viewer attached *before* the run ends follows it live and terminates on
-    its own when the job finalizes — no sentinel, no hang. Closing the producer's
-    half is what ends the iteration, and events already buffered still arrive."""
+    its own when the job finalizes — no sentinel, no hang. What ends the
+    iteration is the viewer re-reading `finished` on its next pass; events
+    already in the buffer are drained ahead of it, so nothing is lost."""
     job = _job(tmp_path, "echo one\necho two\n")
     events: list[RunEvent] = []
 
@@ -207,9 +343,9 @@ async def test_live_viewer_sees_progress_then_ends_at_finalize(tmp_path: Path) -
 
     viewer = asyncio.create_task(watch())
     # Wait for the viewer to actually register rather than assuming one loop turn
-    # suffices: a bare `await asyncio.sleep(0)` has exactly zero margin, so any
-    # suspension point later added inside subscribe() ahead of the register would
-    # surface here as a baffling "log != start" instead of a clear failure.
+    # suffices: `subscribe` is an async generator, so its body doesn't run — and
+    # the cursor isn't registered — until the first `__anext__`. Starting the run
+    # before that point would make this a replay test rather than a live one.
     for _ in range(1000):
         if job._subscribers:
             break

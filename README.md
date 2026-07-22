@@ -128,7 +128,7 @@ argus-forge serve --cors-any --cors-origin https://demo.example --no-run --expor
 | `POST /run` | start the forged `train.sh` on a background job; returns the run's `RunState` (with `run_id`) — the run outlives the request |
 | `GET /runs` | list tracked runs |
 | `GET /run/{id}` | a run's status (poll for the terminal `status` + `returncode` — the argus-proof join) |
-| `GET /run/{id}/stream` | attach to a run: NDJSON `RunEvent`s, buffered backlog then live; reconnect anytime |
+| `GET /run/{id}/stream` | attach to a run: NDJSON `RunEvent`s, the retained tail then live; reconnect anytime |
 | `POST /run/{id}/cancel` | stop a run (SIGTERM→SIGKILL its process group) |
 
 A run is started once (`POST /run`) and watched — or re-watched after a dropped connection — via

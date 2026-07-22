@@ -27,7 +27,11 @@ dependencies = [
 [project.optional-dependencies]
 # argus-cortex[server] carries the suite's shared write-guard and env-flag
 # helpers (argus_cortex.server); it pulls starlette, which fastapi provides too.
-server = ["fastapi>=0.110", "uvicorn>=0.27", "python-multipart>=0.0.7", "argus-cortex[server]>=0.2.0"]
+# anyio is transitive via starlette, but argus_forge.server.jobs imports it
+# directly (typed memory object streams for the /run/{id}/stream fan-out), so
+# it is declared here rather than relied on by accident. >=4 for the generic
+# create_memory_object_stream[T] spelling.
+server = ["fastapi>=0.110", "uvicorn>=0.27", "python-multipart>=0.0.7", "argus-cortex[server]>=0.2.0", "anyio>=4.0"]
 cli = ["typer>=0.12", "rich>=13.0"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff==0.15.16", "httpx>=0.27", "httpx2>=2.7"]
 

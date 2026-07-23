@@ -68,22 +68,26 @@ only under the `-train` suffix (`ghcr.io/smk762/argus-forge:<version>-train`, `:
 `latest`/`<version>` stay the ~200 MB config-renderer and nobody pulls a multi-GB image by accident.
 
 ```bash
-docker run --rm --gpus all --shm-size=8g \
+docker run --rm --init --gpus all --shm-size=8g \
   -e ARGUS_FORGE_READONLY=0 \
-  -p 8103:8103 -v /path/to/out:/data/out \
+  -p 127.0.0.1:8103:8103 -v /path/to/out:/data/out \
   ghcr.io/smk762/argus-forge:latest-train
-# or locally: FORGE_BUILD_TARGET=train ARGUS_FORGE_READONLY=0 docker compose up --build
+# or locally (uncomment `gpus: all` in docker-compose.yaml first):
+# FORGE_BUILD_TARGET=train ARGUS_FORGE_READONLY=0 docker compose up --build
 ```
 
 - **The posture flip stays deliberate.** The train image *also* defaults to `ARGUS_FORGE_READONLY=1`;
   carrying a trainer is what makes flipping it meaningful, not automatic. An armed `/run` executes a forged
   script with no auth — treat reaching the port as shell access on the host (see
-  [demo-safe mode](#demo-safe-mode-no-training)) and only publish it on a trusted network.
+  [demo-safe mode](#demo-safe-mode-no-training)). The command above binds loopback for exactly that
+  reason; publish wider (`-p 8103:8103`) only on a trusted network — docker's port publishing bypasses
+  ufw-style host firewalls, so "the firewall will catch it" is not a safety net.
 - **kohya only.** OneTrainer is driven from its own UI, and the diffusers `train.sh` expects a diffusers
   examples checkout (`DIFFUSERS_SCRIPT`) this image doesn't carry.
 - The base checkpoint downloads from Hugging Face on first run; mount a cache
-  (`-v hf-cache:/root/.cache/huggingface`) to keep it across containers, and `--shm-size` spares the
-  dataloader docker's 64 MB `/dev/shm` default.
+  (`-v hf-cache:/root/.cache/huggingface`, or uncomment the `hf-cache` volume in docker-compose.yaml)
+  to keep it across containers, and `--shm-size` spares the dataloader docker's 64 MB `/dev/shm`
+  default (the compose file sets `shm_size` already).
 - The LoRA lands under the export dir (`<export>/forge/kohya/output/`) on the shared volume — point that
   volume (or a `path_map`) at your ComfyUI-layout models tree (`.../loras/`) and the result is immediately
   visible to argus-proof's `GET /models`, no file shuffling.

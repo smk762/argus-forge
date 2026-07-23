@@ -1,7 +1,10 @@
 # syntax=docker/dockerfile:1
 FROM python:3.11-slim AS builder
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# Pinned — a moving :latest would resolve independently at each of the three
+# sites that name this image (here and the train stage's two RUN mounts), so
+# stages could silently build with different uv versions. Bump all three together.
+COPY --from=ghcr.io/astral-sh/uv:0.11.31 /uv /uvx /bin/
 
 WORKDIR /app
 
@@ -67,9 +70,6 @@ CMD ["argus-forge", "serve", "--port", "8103", "--cors"]
 # driver (nvidia-container-toolkit, `--gpus all`) is needed at run time.
 FROM runtime-base AS train
 
-# kohya-ss/sd-scripts v0.11.1, pinned by commit so the tag can't move under us.
-ARG SD_SCRIPTS_SHA=6721028c79ee85a78b3a06dfd8954dae310a1cce
-
 # opencv-python (an sd-scripts dependency) links libGL/glib at import time.
 # gcc + libc6-dev are not build tools here but a RUNTIME dependency: on a GPU
 # host, triton (via bitsandbytes, which kohya's default AdamW8bit optimizer
@@ -82,6 +82,21 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 gcc libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# torch first, alone, and *above* the sd-scripts checkout: by far the largest
+# layer (several GB), and it depends on nothing below, so an SD_SCRIPTS_SHA
+# bump — the routine maintenance path here — reuses it from cache. The ARG is
+# declared *after* this RUN on purpose: a declared ARG joins every later RUN's
+# cache key, so hoisting it above would re-bust this layer on every bump. The
+# pin is what sd-scripts v0.11.1 recommends — re-check it whenever the SHA
+# moves. uv is mounted, not installed: same build-tool hygiene as the builder.
+RUN --mount=from=ghcr.io/astral-sh/uv:0.11.31,source=/uv,target=/bin/uv \
+    --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system torch==2.6.0 torchvision==0.21.0 \
+      --index-url https://download.pytorch.org/whl/cu124
+
+# kohya-ss/sd-scripts v0.11.1, pinned by commit so the tag can't move under us.
+ARG SD_SCRIPTS_SHA=6721028c79ee85a78b3a06dfd8954dae310a1cce
+
 # Tarball by commit SHA instead of a git clone: pinned by construction, and the
 # image never needs git. The forged train.sh cds into $SD_SCRIPTS_DIR to run
 # sdxl_train_network.py, so the checkout itself stays in the image.
@@ -90,21 +105,19 @@ RUN mkdir -p /opt/sd-scripts \
     && tar -xzf /tmp/sd-scripts.tar.gz -C /opt/sd-scripts --strip-components=1 \
     && rm /tmp/sd-scripts.tar.gz
 
-# torch first, alone: the pin sd-scripts v0.11.1 recommends, from the cu124
-# index. Its own layer because it is by far the largest (several GB) and only
-# moves on an sd-scripts bump — requirements.txt churn below never re-downloads
-# it. uv is mounted, not installed: same build-tool hygiene as the builder stage.
-RUN --mount=from=ghcr.io/astral-sh/uv:latest,source=/uv,target=/bin/uv \
-    --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system torch==2.6.0 torchvision==0.21.0 \
-      --index-url https://download.pytorch.org/whl/cu124
-
 # sd-scripts' own pins (accelerate, diffusers, transformers, ...). The file
 # ends in `-e .`, which resolves relative to the cwd — hence the cd; that
 # editable install is what makes `import library.train_util` work everywhere.
-RUN --mount=from=ghcr.io/astral-sh/uv:latest,source=/uv,target=/bin/uv \
+# The constraint file holds torch/torchvision to the cu124 build above: this
+# install resolves against default PyPI, so a future requirements.txt whose
+# pins conflicted with 2.6.0 would otherwise silently swap in a PyPI wheel —
+# better a loud resolver error here than a wrong-CUDA torch discovered on a
+# GPU host. (The smoke test asserts the same pins from the run side.)
+RUN --mount=from=ghcr.io/astral-sh/uv:0.11.31,source=/uv,target=/bin/uv \
     --mount=type=cache,target=/root/.cache/uv \
-    cd /opt/sd-scripts && uv pip install --system -r requirements.txt
+    printf 'torch==2.6.0+cu124\ntorchvision==0.21.0+cu124\n' > /tmp/torch-pin.txt \
+    && cd /opt/sd-scripts && uv pip install --system -c /tmp/torch-pin.txt -r requirements.txt \
+    && rm /tmp/torch-pin.txt
 
 # runner.py spawns train.sh with {**os.environ, **req.env}, so this default
 # reaches the script and a caller no longer has to pass SD_SCRIPTS_DIR per run.

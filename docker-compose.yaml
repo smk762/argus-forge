@@ -12,6 +12,11 @@ services:
       # trainer stack (torch CUDA wheels + kohya sd-scripts, multi-GB build) so
       # POST /run can go live on a GPU host — see README "Training image".
       target: ${FORGE_BUILD_TARGET:-runtime}
+    # Distinct image name per target: without this both variants share the one
+    # compose-derived tag, and a later `docker compose up` *without* --build
+    # silently reuses whichever was built last — unsetting FORGE_BUILD_TARGET
+    # alone would not bring the thin image back.
+    image: argus-forge:${FORGE_BUILD_TARGET:-runtime}-local
     ports:
       - "${FORGE_PORT:-8103}:8103"
     environment:
@@ -40,7 +45,26 @@ services:
       # The curator export dir forge reads, and writes <export>/forge/ into.
       # Must be the same data the UI names in its request paths.
       - ${FORGE_OUTPUT_PATH:-./out}:/data/out
+      # Train target: keep the multi-GB Hugging Face base-checkpoint download
+      # across container recreations — uncomment this and the `volumes:` block
+      # at the bottom (mirrors the README's `-v hf-cache:...` for docker run).
+      # - hf-cache:/root/.cache/huggingface
+    # Trainer dataloaders stage batches in /dev/shm (sd-scripts defaults to 8
+    # workers) and docker's default is 64 MB — without this a live run dies
+    # mid-epoch with "DataLoader worker killed by Bus error". Harmless for the
+    # thin runtime target, so set unconditionally; mirrors the README
+    # docker-run's --shm-size=8g.
+    shm_size: "8g"
+    # PID-1 reaper: cancelled runs kill the trainer's process group, and
+    # dataloader workers orphaned in that window re-parent to PID 1 (uvicorn),
+    # which never reaps non-asyncio children — zombies for the container's
+    # lifetime without an init.
+    init: true
     # Live training (train target + ARGUS_FORGE_READONLY=0) needs the GPU
     # passed through — uncomment (requires nvidia-container-toolkit):
     # gpus: all
     restart: unless-stopped
+
+# Uncomment together with the hf-cache mount above.
+# volumes:
+#   hf-cache:

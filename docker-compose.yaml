@@ -8,6 +8,10 @@ services:
       # dev image is never mistaken for a tagged one.
       args:
         VERSION: ${FORGE_VERSION:-0.0.0+local}
+      # `runtime` (default) is the thin config-renderer; `train` bakes in the
+      # trainer stack (torch CUDA wheels + kohya sd-scripts, multi-GB build) so
+      # POST /run can go live on a GPU host — see README "Training image".
+      target: ${FORGE_BUILD_TARGET:-runtime}
     ports:
       - "${FORGE_PORT:-8103}:8103"
     environment:
@@ -29,10 +33,14 @@ services:
       # e.g. FORGE_PATH_MAP=/data/out=/home/me/argus/out. Empty = no rewriting.
       FORGE_PATH_MAP: ${FORGE_PATH_MAP:-}
       # Where the trainer checkout lives, for POST /run. Irrelevant in readonly
-      # mode; uncomment (and mount it) to actually train.
+      # mode. The train image bakes SD_SCRIPTS_DIR=/opt/sd-scripts already; for
+      # the thin image, mount a checkout and uncomment.
       # SD_SCRIPTS_DIR: /opt/sd-scripts
     volumes:
       # The curator export dir forge reads, and writes <export>/forge/ into.
       # Must be the same data the UI names in its request paths.
       - ${FORGE_OUTPUT_PATH:-./out}:/data/out
+    # Live training (train target + ARGUS_FORGE_READONLY=0) needs the GPU
+    # passed through — uncomment (requires nvidia-container-toolkit):
+    # gpus: all
     restart: unless-stopped

@@ -32,6 +32,7 @@ out
 # source tree is only here for `uv pip install .`.
 tests
 schema
+scripts
 .github
 Makefile
 docker-compose.yaml

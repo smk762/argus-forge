@@ -55,7 +55,39 @@ The image contains no trainer, so it defaults to [demo-safe mode](#demo-safe-mod
 render, training is refused and nothing is written. That default lives in the image itself
 (`ARGUS_FORGE_READONLY=1`), so a bare `docker run` is as locked down as `docker compose up`; the port is
 published on 0.0.0.0 and a run is real code execution on the host, so the safe direction is the default one.
-Set `ARGUS_FORGE_READONLY=0` on a trusted host once you have mounted a trainer.
+Set `ARGUS_FORGE_READONLY=0` on a trusted host once you have a trainer — either mounted, or baked in via
+the [train image](#training-image--train).
+
+### Training image (`-train`)
+
+A second image variant carries the training runtime, so `POST /run` can go live on a GPU host instead of
+crashing for want of a trainer: torch 2.6 (CUDA 12.4 wheels), accelerate, and a pinned
+[kohya-ss/sd-scripts](https://github.com/kohya-ss/sd-scripts) checkout at `/opt/sd-scripts`
+(`SD_SCRIPTS_DIR` is preset, so a forged kohya `train.sh` runs as-is). It is opt-in everywhere: published
+only under the `-train` suffix (`ghcr.io/smk762/argus-forge:<version>-train`, `:latest-train`) so
+`latest`/`<version>` stay the ~200 MB config-renderer and nobody pulls a multi-GB image by accident.
+
+```bash
+docker run --rm --gpus all --shm-size=8g \
+  -e ARGUS_FORGE_READONLY=0 \
+  -p 8103:8103 -v /path/to/out:/data/out \
+  ghcr.io/smk762/argus-forge:latest-train
+# or locally: FORGE_BUILD_TARGET=train ARGUS_FORGE_READONLY=0 docker compose up --build
+```
+
+- **The posture flip stays deliberate.** The train image *also* defaults to `ARGUS_FORGE_READONLY=1`;
+  carrying a trainer is what makes flipping it meaningful, not automatic. An armed `/run` executes a forged
+  script with no auth — treat reaching the port as shell access on the host (see
+  [demo-safe mode](#demo-safe-mode-no-training)) and only publish it on a trusted network.
+- **kohya only.** OneTrainer is driven from its own UI, and the diffusers `train.sh` expects a diffusers
+  examples checkout (`DIFFUSERS_SCRIPT`) this image doesn't carry.
+- The base checkpoint downloads from Hugging Face on first run; mount a cache
+  (`-v hf-cache:/root/.cache/huggingface`) to keep it across containers, and `--shm-size` spares the
+  dataloader docker's 64 MB `/dev/shm` default.
+- The LoRA lands under the export dir (`<export>/forge/kohya/output/`) on the shared volume — point that
+  volume (or a `path_map`) at your ComfyUI-layout models tree (`.../loras/`) and the result is immediately
+  visible to argus-proof's `GET /models`, no file shuffling.
+- The `-train` tag is smoke-tested in CI, **not** e2e-trained — see [CI / Release](#ci--release).
 
 ## CLI
 
@@ -164,8 +196,10 @@ so on a publicly reachable host an ordinary `curl` would otherwise overwrite the
 `metadata.jsonl` and leave an executable `train.sh` behind on shared storage.
 
 `GET /health` reports `"training": "enabled" | "disabled"`, so a frontend can disable its train button up
-front rather than discovering the refusal by clicking it. **The published image turns this mode on by
-default** (and the compose file with it) — it ships no trainer, so a run there could only ever fail.
+front rather than discovering the refusal by clicking it. **Both published images turn this mode on by
+default** (and the compose file with it): the thin image ships no trainer, so a run there could only ever
+fail, and the [train image](#training-image--train) keeps the same default so that arming `/run` is always
+an explicit choice rather than a side effect of pulling a bigger tag.
 `ARGUS_FORGE_READONLY` is a protection flag, so it fails *safe*: a value it cannot parse (`=y`, `=enabled`)
 warns and keeps the guard on rather than quietly enabling writes. Only an explicit `0`/`false`/`no`/`off`
 turns it off.
@@ -199,7 +233,14 @@ make lint
 
 - **CI** runs via the shared [`argus-ci`](https://github.com/smk762/argus-ci) reusable workflow
   (plus `argus-forge schema --check` to keep the committed wire schema honest).
-- **Release** publishes to PyPI (OIDC trusted publishing) and GHCR on `v*` tags.
+- **Release** publishes to PyPI (OIDC trusted publishing) and GHCR on `v*` tags — the thin image and the
+  [`-train` variant](#training-image--train) as independent jobs, so a fault in one never withholds the other.
+- The `-train` image is gated by a CPU-only smoke test before it is pushed
+  ([`scripts/smoke-train-image.sh`](scripts/smoke-train-image.sh)): the image builds, `serve` answers
+  `/health` (still demo-safe), torch/accelerate/sd-scripts import, and a forged kohya config passes the
+  `/run` validation path (`run --dry-run`). CI has no GPU, so **no actual training step runs** — a `-train`
+  tag is honest about building and validating, not e2e-verified; the first real `accelerate launch` happens
+  on your GPU host.
 - Versioning is derived from git tags via `hatch-vcs` — tag `vX.Y.Z` to cut a release.
 
 This repo was scaffolded from [`argus-pkg-template`](https://github.com/smk762/argus-pkg-template).

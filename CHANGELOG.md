@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A `-train` image variant, so `POST /run` can go live on GPU hosts** (issue
+  #24). `ghcr.io/smk762/argus-forge:<version>-train` (also `:latest-train`)
+  layers torch 2.6 (cu124 wheels), accelerate, and a pinned kohya-ss/sd-scripts
+  v0.11.1 checkout (`SD_SCRIPTS_DIR=/opt/sd-scripts` preset) on top of the
+  existing image; `docker build --target train` / `FORGE_BUILD_TARGET=train`
+  build it locally. Opt-in everywhere: the default `latest`/`<version>` tags
+  stay the thin demo-safe config-renderer, and the train image *keeps*
+  `ARGUS_FORGE_READONLY=1` — enabling live runs remains a deliberate env flip
+  on a trusted host, since reaching an armed `/run` port is equivalent to shell
+  access. Release-gated by a CPU-only smoke test
+  (`scripts/smoke-train-image.sh`: serve + trainer-stack imports + the
+  `prepare_run` validation path); CI has no GPU, so a `-train` tag is
+  explicitly not e2e-trained.
+
 ### Removed
 
 - **BREAKING: `argus_forge.jobs` is gone**; the job registry now lives at

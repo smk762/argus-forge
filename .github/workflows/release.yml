@@ -116,6 +116,9 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
+          # Explicit even though `runtime` is the Dockerfile's last (default)
+          # stage: this tag must never silently become the multi-GB trainer.
+          target: runtime
           push: true
           build-args: |
             VERSION=${{ steps.version.outputs.value }}
@@ -123,3 +126,74 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  publish-train-image:
+    runs-on: ubuntu-latest
+    # Independent of publish-image on purpose, mirroring the TestPyPI stance
+    # above: a train-stack fault (an sd-scripts pin rotting, a torch index
+    # outage) must not withhold the thin image or the wheel — and vice versa. A
+    # failure here still marks the whole run failed, so it stays loud.
+    needs: test-install
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      # torch's CUDA wheels make this image multi-GB; the stock runner doesn't
+      # reliably fit image + layer store next to the preinstalled toolchains.
+      - name: Free runner disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      # No setup-buildx: the default docker driver builds straight into the
+      # daemon, so the bytes the smoke test runs are the bytes the push step
+      # reuses from local layer cache — no double storage, no re-build. GHA
+      # cache is skipped too: the train layers would evict the thin image's
+      # entries from the repo's 10 GB cache budget without fitting themselves.
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/argus-forge
+          # One image name, two variants: the -train suffix (0.2.0-train,
+          # 0.2-train, latest-train) is what keeps the default tags thin —
+          # nobody pulls the trainer stack by accident (issue #24).
+          flavor: |
+            suffix=-train
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            # Same guard as the thin image: only a final release moves
+            # `latest-train`; suffix repeated because a per-tag attribute
+            # overrides the global flavor rather than composing with it.
+            type=raw,value=latest,suffix=-train,enable=${{ !contains(github.ref_name, '-') }}
+      - id: version
+        run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Build train image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: train
+          load: true
+          build-args: |
+            VERSION=${{ steps.version.outputs.value }}
+          tags: argus-forge:train-smoke
+      # CI has no GPU, so an actual training step is out of reach; this is the
+      # honest gate short of one — serve + imports + the /run validation path.
+      # A -train tag is therefore NOT e2e-verified (see README "CI / Release").
+      - name: Smoke test train image
+        run: scripts/smoke-train-image.sh argus-forge:train-smoke
+      - name: Push train image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: train
+          push: true
+          build-args: |
+            VERSION=${{ steps.version.outputs.value }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

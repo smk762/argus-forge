@@ -6,6 +6,12 @@ name: Release to PyPI
 on:
   push:
     tags: ["v*"]
+  # Sent by argus-cortex's release workflow. The image installs argus-cortex
+  # from the pyproject range at build time, so rebuilding the newest release's
+  # image is how a new cortex reaches it. Only the image jobs run: PyPI and the
+  # GitHub Release for that tag already exist.
+  repository_dispatch:
+    types: [cortex-released]
 
 permissions:
   contents: read
@@ -13,6 +19,9 @@ permissions:
 
 jobs:
   build:
+    # Not on a cortex dispatch, so the PyPI and Release jobs that chain off it
+    # skip too.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -79,14 +88,51 @@ jobs:
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
 
+  release-tag:
+    # The tag the image jobs build: the pushed one, or on a cortex dispatch the
+    # newest final release. A pre-release never moved `latest`, so a dispatch
+    # does not rebuild one.
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      sha: ${{ steps.tag.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'repository_dispatch'
+      - id: tag
+        env:
+          CORTEX_VERSION: ${{ github.event.client_payload.version }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != repository_dispatch ]; then
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          refs=$(git ls-remote --tags origin 'refs/tags/v*')
+          tag=$(echo "$refs" | sed -n 's|.*refs/tags/\(v[0-9]*\.[0-9]*\.[0-9]*\)\(\^{}\)\{0,1\}$|\1|p' | sort -uV | tail -n1)
+          if [ -z "$tag" ]; then
+            echo "::notice::No release tag yet, so no image to rebuild for cortex $CORTEX_VERSION."
+            exit 0
+          fi
+          # An annotated tag lists its commit on the peeled ^{} line.
+          sha=$(echo "$refs" | awk -v t="refs/tags/$tag" '$2 == t {l = $1} $2 == t "^{}" {p = $1} END {print p ? p : l}')
+          echo "Rebuilding $tag ($sha) for cortex $CORTEX_VERSION."
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
   publish-image:
     runs-on: ubuntu-latest
-    needs: test-install
+    needs: [release-tag, test-install]
+    # On a cortex dispatch test-install is skipped (nothing was built for PyPI),
+    # so the job runs on the tag alone.
+    if: "!cancelled() && needs.release-tag.outputs.tag != '' && (needs.test-install.result == 'success' || github.event_name == 'repository_dispatch')"
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-tag.outputs.tag }}
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -97,13 +143,14 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository_owner }}/argus-forge
+          labels: org.opencontainers.image.revision=${{ needs.release-tag.outputs.sha }}
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{version}},value=${{ needs.release-tag.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.release-tag.outputs.tag }}
             # Only a final release moves `latest`. The trigger is `v*`, so
             # without this guard a `v0.2.0-rc1` tag would silently repoint every
             # `:latest` user (README quickstart, compose) onto a candidate.
-            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+            type=raw,value=latest,enable=${{ !contains(needs.release-tag.outputs.tag, '-') }}
       # The base image has no git, so the version is passed in via build-arg
       # (SETUPTOOLS_SCM_PRETEND_VERSION) rather than read from .git history.
       # Derived from the tag itself, not from steps.meta.outputs.version: the
@@ -111,7 +158,9 @@ jobs:
       # type=semver entries drop out and that output falls back to the literal
       # string "latest" — which is not a PEP 440 version and fails the build.
       - id: version
-        run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ needs.release-tag.outputs.tag }}
+        run: echo "value=${TAG#v}" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -124,6 +173,9 @@ jobs:
             VERSION=${{ steps.version.outputs.value }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # A dispatch rebuilds an unchanged context, so a cached install layer
+          # would keep the old argus-cortex.
+          no-cache: ${{ github.event_name == 'repository_dispatch' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -133,12 +185,17 @@ jobs:
     # above: a train-stack fault (an sd-scripts pin rotting, a torch index
     # outage) must not withhold the thin image or the wheel — and vice versa. A
     # failure here still marks the whole run failed, so it stays loud.
-    needs: test-install
+    needs: [release-tag, test-install]
+    # On a cortex dispatch test-install is skipped (nothing was built for PyPI),
+    # so the job runs on the tag alone.
+    if: "!cancelled() && needs.release-tag.outputs.tag != '' && (needs.test-install.result == 'success' || github.event_name == 'repository_dispatch')"
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-tag.outputs.tag }}
       # torch's CUDA wheels make this image multi-GB; the stock runner doesn't
       # reliably fit image + layer store next to the preinstalled toolchains.
       - name: Free runner disk
@@ -168,18 +225,21 @@ jobs:
           flavor: |
             suffix=-train
             latest=false
+          labels: org.opencontainers.image.revision=${{ needs.release-tag.outputs.sha }}
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{version}},value=${{ needs.release-tag.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.release-tag.outputs.tag }}
             # Same guard as the thin image: only a final release moves
             # `latest-train`; suffix repeated because a per-tag attribute
             # overrides the global flavor rather than composing with it.
-            type=raw,value=latest,suffix=-train,enable=${{ !contains(github.ref_name, '-') }}
+            type=raw,value=latest,suffix=-train,enable=${{ !contains(needs.release-tag.outputs.tag, '-') }}
       # Derived from the tag, not steps.meta.outputs.version — same reasoning as
       # the publish-image job's version step above (non-semver v* tags make that
       # output fall back to the literal "latest", which is not PEP 440).
       - id: version
-        run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ needs.release-tag.outputs.tag }}
+        run: echo "value=${TAG#v}" >> "$GITHUB_OUTPUT"
       # One build for smoke AND push: the release tags are stamped onto the same
       # image the smoke step exercises, so the pushed image is byte-for-byte the
       # smoked one — no second build to drift (labels, a moving base ref) apart.

@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A new argus-cortex rebuilds the published image.** `release.yml` also runs on
+  the `cortex-released` dispatch argus-cortex's release sends: only the image job runs,
+  rebuilding the newest final `v*` tag without cache and republishing its tags, so the
+  image picks up the cortex its pyproject range now resolves to.
+
 - **A `-train` image variant, so `POST /run` can go live on GPU hosts** (issue
   #24). `ghcr.io/smk762/argus-forge:<version>-train` (also `:latest-train`)
   layers torch 2.6 (cu124 wheels), accelerate, and a pinned kohya-ss/sd-scripts

@@ -1,0 +1,21 @@
+<!-- ai-audit:agent-packs:start -->
+## Agent coding packs (ai-code-auditor)
+
+Do not wait for a pasted brief — fetch the audit packs for `argus-forge` yourself.
+
+1. **Bundle (one call):** `GET http://192.168.1.198:8765/audit/packs/bundle?repo=argus-forge`
+   (world model + ranked specialist packs + token-capped `briefs_markdown`;
+   optional `&token_budget=2500&q=<keyword>&limit_specialists=5`).
+   CLI equivalent: `ai-audit packs --bundle --repo argus-forge`.
+2. **Claim** the specialist pack you pick:
+   `POST http://192.168.1.198:8765/audit/packs/<id>/status` `{"status":"claimed"}`
+   (send `X-API-Token: $AI_AUDIT_API_TOKEN`).
+3. **Fix:** `ai-audit repair --pack-id <id>` (agent-composer repair loop; fetches the pack for you;
+   HTTP: `POST http://127.0.0.1:9150/api/repair/run` `{"pack_id":"<id>","mode":"review"}`),
+   or read `GET http://192.168.1.198:8765/audit/packs/<id>` / `.../brief` and implement it yourself.
+4. **Close:** `POST http://192.168.1.198:8765/audit/validate_patch` `{"repo":"argus-forge","patch":"<diff>","pack_id":"<id>"}`
+   — a passing run marks the pack `resolved`.
+
+World-model constraints (ownership, boundaries, scan branch `dev`) win over guesswork.
+Full flow: ai-code-auditor `AGENTS.md`.
+<!-- ai-audit:agent-packs:end -->

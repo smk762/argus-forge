@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import structlog
+from argus_cortex.taxonomy import TARGET_CATEGORIES
 
 try:
     import typer
@@ -39,7 +40,7 @@ def config(
     trigger: str | None = Option(None, "--trigger", help="Concept token (default: slug of the export dir name)"),
     output_name: str | None = Option(None, "--output-name", help="LoRA filename stem (default: <dir>-lora)"),
     category: str | None = Option(
-        None, "--category", help="Override manifest category: identity|wardrobe|pose_composition|setting"
+        None, "--category", help=f"Override manifest category: {'|'.join(TARGET_CATEGORIES)}"
     ),
     repeats: int | None = Option(None, "--repeats", help="Override per-image repeats"),
     epochs: int | None = Option(None, "--epochs", help="Override epochs"),
@@ -218,7 +219,9 @@ def run(
 @app.command()
 def inspect(
     export_dir: Path = Argument(..., help="Curator export dir to inspect"),
-    category: str | None = Option(None, "--category", help="Override manifest category"),
+    category: str | None = Option(
+        None, "--category", help=f"Override manifest category: {'|'.join(TARGET_CATEGORIES)}"
+    ),
     as_json: bool = Option(False, "--json", help="Print DatasetInfo as JSON"),
 ) -> None:
     """Summarise an export dir: images, captions, manifest, suggested params."""

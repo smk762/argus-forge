@@ -84,7 +84,8 @@
                 "identity",
                 "wardrobe",
                 "pose_composition",
-                "setting"
+                "setting",
+                "concept"
               ],
               "type": "string"
             },
@@ -273,7 +274,8 @@
                 "identity",
                 "wardrobe",
                 "pose_composition",
-                "setting"
+                "setting",
+                "concept"
               ],
               "type": "string"
             },
@@ -754,7 +756,7 @@
       "type": "object"
     },
     "TargetProfile": {
-      "description": "What the dataset was curated *for* \u2014 inherited verbatim from argus-curator.",
+      "description": "What a dataset was curated for \u2014 shared verbatim across the suite.\n\nInherited unchanged from stage to stage (curator \u2192 lens \u2192 forge \u2192 proof) so\na decision made once at curation time is honoured everywhere downstream; no\nstage remaps the taxonomy.",
       "properties": {
         "checkpoint": {
           "anyOf": [
@@ -786,7 +788,8 @@
             "identity",
             "wardrobe",
             "pose_composition",
-            "setting"
+            "setting",
+            "concept"
           ],
           "title": "Target Category",
           "type": "string"

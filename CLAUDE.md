@@ -50,7 +50,7 @@ Run a single test: `uv run --no-sync pytest tests/test_core.py::test_name -q`.
 ## Conventions & gotchas
 
 - **Versioning is git-tag-derived** (`hatch-vcs`). Never hand-edit a version; `src/argus_forge/_version.py` is generated (gitignored). Tag `vX.Y.Z` to release.
-- **The wire schema is checked in CI.** If you touch `models.py` types that appear in `wire_schema()`, run `argus-forge schema --check` — CI fails if `schema/forge-wire.schema.json` drifts. Regenerate with `argus-forge schema > schema/forge-wire.schema.json`.
+- **The wire schema is checked in CI.** If you touch `models.py` types that appear in `wire_schema()`, run `argus-forge schema --check` — CI fails if `schema/forge-wire.schema.json` drifts. Regenerate with `argus-forge schema` (it writes the file itself; don't redirect stdout into it).
 - **Two safety boundaries, both intentional — don't loosen them casually:**
   - The server's `--export-root` fence: a request's `export_dir` must resolve to a path *under* the root (symlinks resolved). The **CLI is deliberately unconstrained** — it's your own shell.
   - Demo-safe / read-only mode (`ARGUS_FORGE_READONLY`, `--no-run`): `/run` refuses with 403 (via middleware, before body validation) and `/config` is forced to `dry_run`. It fails *safe* — an unparseable flag keeps the guard on.

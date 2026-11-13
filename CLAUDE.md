@@ -50,6 +50,10 @@ Run a single test: `uv run --no-sync pytest tests/test_core.py::test_name -q`.
 - Shared suite code (taxonomy, wire-schema discipline, the server write-guard/env-flag helpers) lives in **argus-cortex** (`argus-cortex[server]`), not here — reuse it rather than re-implementing.
 - `structlog` for logging; Pydantic v2 everywhere; async server + runner (`pytest asyncio_mode = auto`). Ruff line-length 120.
 
+## Branches
+
+`dev` is the default branch and the base for every PR. Cut feature branches from `origin/dev` and bring them up to date by merging `origin/dev`, never `main`. Never open a PR against `main` or push work to it directly: `main` must never be ahead of `dev`. A release fast-forwards `main` to a `dev` commit that passed CI (`git push origin origin/dev:main`), then tags it. If `main` is protected and needs a PR, merge the release PR, then immediately merge `main` back into `dev` so the merge commit is not left on `main` alone.
+
 ## CI / release
 
 CI runs via the shared [`argus-ci`](https://github.com/smk762/argus-ci) reusable workflow plus `argus-forge schema --check`. Release publishes to PyPI (OIDC trusted publishing) + GHCR on `v*` tags. This repo is scaffolded from [`argus-pkg-template`](https://github.com/smk762/argus-pkg-template) — run `copier update` to pull tooling changes.

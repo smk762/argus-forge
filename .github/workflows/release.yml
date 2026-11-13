@@ -96,9 +96,10 @@ jobs:
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       sha: ${{ steps.tag.outputs.sha }}
+      runtime-target: ${{ steps.stages.outputs.runtime-target }}
+      train: ${{ steps.stages.outputs.train }}
     steps:
       - uses: actions/checkout@v4
-        if: github.event_name == 'repository_dispatch'
       - id: tag
         env:
           CORTEX_VERSION: ${{ github.event.client_payload.version }}
@@ -119,6 +120,35 @@ jobs:
           echo "Rebuilding $tag ($sha) for cortex $CORTEX_VERSION."
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      # The image jobs run this workflow file but build the *tag's* Dockerfile.
+      # On a dispatch those two can be releases apart: v0.1.1's Dockerfile
+      # predates the named `runtime` and `train` stages, so `--target runtime`
+      # and `--target train` both failed with "target stage could not be found".
+      # Read the stages the tag actually has and build only what exists.
+      - id: stages
+        if: steps.tag.outputs.tag != ''
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          git fetch --depth=1 --no-tags origin "+refs/tags/$TAG:refs/tags/$TAG"
+          dockerfile=$(git show "refs/tags/$TAG:Dockerfile")
+          has_stage() {
+            grep -qiE "^FROM[[:space:]].*[[:space:]]AS[[:space:]]+$1[[:space:]]*$" <<<"$dockerfile"
+          }
+          if has_stage runtime; then
+            echo "runtime-target=runtime" >> "$GITHUB_OUTPUT"
+          else
+            # Before the stages were named, the last (default) stage was the
+            # thin image, so building with no target rebuilds the same image.
+            echo "::notice::$TAG's Dockerfile has no 'runtime' stage; building its default (last) stage as the thin image."
+            echo "runtime-target=" >> "$GITHUB_OUTPUT"
+          fi
+          if has_stage train; then
+            echo "train=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::$TAG's Dockerfile has no 'train' stage, so it never shipped a -train image; skipping the train image rebuild."
+            echo "train=false" >> "$GITHUB_OUTPUT"
+          fi
 
   publish-image:
     runs-on: ubuntu-latest
@@ -167,7 +197,9 @@ jobs:
           file: ./Dockerfile
           # Explicit even though `runtime` is the Dockerfile's last (default)
           # stage: this tag must never silently become the multi-GB trainer.
-          target: runtime
+          # Empty (the default stage) only for a tag that predates the named
+          # stages; see release-tag's stages step.
+          target: ${{ needs.release-tag.outputs.runtime-target }}
           push: true
           build-args: |
             VERSION=${{ steps.version.outputs.value }}
@@ -187,8 +219,9 @@ jobs:
     # failure here still marks the whole run failed, so it stays loud.
     needs: [release-tag, test-install]
     # On a cortex dispatch test-install is skipped (nothing was built for PyPI),
-    # so the job runs on the tag alone.
-    if: "!cancelled() && needs.release-tag.outputs.tag != '' && (needs.test-install.result == 'success' || github.event_name == 'repository_dispatch')"
+    # so the job runs on the tag alone. A tag whose Dockerfile has no `train`
+    # stage (v0.1.1 and earlier) skips this job.
+    if: "!cancelled() && needs.release-tag.outputs.tag != '' && needs.release-tag.outputs.train == 'true' && (needs.test-install.result == 'success' || github.event_name == 'repository_dispatch')"
     permissions:
       contents: read
       packages: write

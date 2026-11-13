@@ -13,6 +13,16 @@ argus-quarry -> argus-curator -> argus-lens -> argus-forge -> your trainer -> ar
 
 The hard part is not rendering TOML — it is being faithful to what the curator exported and what a trainer will actually read (caption pairing, kohya's non-recursive globs, container↔host path translation, base-checkpoint resolution). Read [README.md](README.md) for the *why* behind each of those; it is unusually detailed and is the source of truth for behaviour.
 
+## Argus suite
+<!-- argus-suite: keep this block; argus-ci checks for it -->
+This repo is part of the Argus suite. The suite map below lists every sibling and what it owns; check it before
+building something a sibling may already do. **On every release, update this repo's row and capabilities in
+argus-cortex's SUITE.md** (a PR to argus-cortex in the same release).
+
+@../argus-core/SUITE.md
+
+Not checked out? Read https://github.com/smk762/argus-cortex/blob/main/SUITE.md
+
 ## Layout
 
 `src/argus_forge/`:
@@ -40,7 +50,7 @@ Run a single test: `uv run --no-sync pytest tests/test_core.py::test_name -q`.
 ## Conventions & gotchas
 
 - **Versioning is git-tag-derived** (`hatch-vcs`). Never hand-edit a version; `src/argus_forge/_version.py` is generated (gitignored). Tag `vX.Y.Z` to release.
-- **The wire schema is checked in CI.** If you touch `models.py` types that appear in `wire_schema()`, run `argus-forge schema --check` — CI fails if `schema/forge-wire.schema.json` drifts. Regenerate with `argus-forge schema > schema/forge-wire.schema.json`.
+- **The wire schema is checked in CI.** If you touch `models.py` types that appear in `wire_schema()`, run `argus-forge schema --check` — CI fails if `schema/forge-wire.schema.json` drifts. Regenerate with `argus-forge schema` (it writes the file itself; don't redirect stdout into it).
 - **Two safety boundaries, both intentional — don't loosen them casually:**
   - The server's `--export-root` fence: a request's `export_dir` must resolve to a path *under* the root (symlinks resolved). The **CLI is deliberately unconstrained** — it's your own shell.
   - Demo-safe / read-only mode (`ARGUS_FORGE_READONLY`, `--no-run`): `/run` refuses with 403 (via middleware, before body validation) and `/config` is forced to `dry_run`. It fails *safe* — an unparseable flag keeps the guard on.
@@ -49,6 +59,10 @@ Run a single test: `uv run --no-sync pytest tests/test_core.py::test_name -q`.
 - **kohya emits one subset per image directory** (its glob doesn't recurse). A structure-preserving export would otherwise train zero images.
 - Shared suite code (taxonomy, wire-schema discipline, the server write-guard/env-flag helpers) lives in **argus-cortex** (`argus-cortex[server]`), not here — reuse it rather than re-implementing.
 - `structlog` for logging; Pydantic v2 everywhere; async server + runner (`pytest asyncio_mode = auto`). Ruff line-length 120.
+
+## Branches
+
+`dev` is the default branch and the base for every PR. Cut feature branches from `origin/dev` and bring them up to date by merging `origin/dev`, never `main`. Never open a PR against `main` or push work to it directly: `main` must never be ahead of `dev`. A release fast-forwards `main` to a `dev` commit that passed CI (`git push origin origin/dev:main`), then tags it. If `main` is protected and needs a PR, merge the release PR, then immediately merge `main` back into `dev` so the merge commit is not left on `main` alone.
 
 ## CI / release
 

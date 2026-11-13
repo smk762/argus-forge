@@ -1,0 +1,24 @@
+<!-- ai-audit:agent-packs:start -->
+## Agent coding packs (ai-code-auditor)
+
+Do not wait for a pasted brief — fetch the audit packs for `argus-forge` yourself.
+
+The audit API base URL is `$AI_AUDIT_PUBLIC_BASE_URL`. The real host/IP is in the local `.env`
+(see `.env.example`, placeholder `http://<AUDIT_HOST>:8765`); read it there, don't guess.
+
+1. **Bundle (one call):** `GET $AI_AUDIT_PUBLIC_BASE_URL/audit/packs/bundle?repo=argus-forge`
+   (world model + ranked specialist packs + token-capped `briefs_markdown`;
+   optional `&token_budget=2500&q=<keyword>&limit_specialists=5`).
+   CLI equivalent: `ai-audit packs --bundle --repo argus-forge`.
+2. **Claim** the specialist pack you pick:
+   `POST $AI_AUDIT_PUBLIC_BASE_URL/audit/packs/<id>/status` `{"status":"claimed"}`
+   (send `X-API-Token: $AI_AUDIT_API_TOKEN`).
+3. **Fix:** `ai-audit repair --pack-id <id>` (agent-composer repair loop; fetches the pack for you;
+   HTTP: `POST http://127.0.0.1:9150/api/repair/run` `{"pack_id":"<id>","mode":"review"}`),
+   or read `GET $AI_AUDIT_PUBLIC_BASE_URL/audit/packs/<id>` / `.../brief` and implement it yourself.
+4. **Close:** `POST $AI_AUDIT_PUBLIC_BASE_URL/audit/validate_patch` `{"repo":"argus-forge","patch":"<diff>","pack_id":"<id>"}`
+   — a passing run marks the pack `resolved`.
+
+World-model constraints (ownership, boundaries, scan branch `dev`) win over guesswork.
+Full flow: ai-code-auditor `AGENTS.md`.
+<!-- ai-audit:agent-packs:end -->

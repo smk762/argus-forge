@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import pytest
 
-from argus_forge.heuristics import apply_overrides, dataset_size_status, suggest_training_params
-from argus_forge.models import ParamOverrides
+from argus_forge.heuristics import (
+    CATEGORY_LABELS,
+    DATASET_SIZE_GUIDE,
+    TRAINING_BIAS,
+    apply_overrides,
+    dataset_size_status,
+    suggest_training_params,
+)
+from argus_forge.models import TARGET_CATEGORIES, ParamOverrides
 
 
 @pytest.mark.parametrize(
@@ -52,3 +59,22 @@ def test_apply_overrides_recomputes_steps() -> None:
 )
 def test_dataset_size_status_tones(count: int, tone: str) -> None:
     assert dataset_size_status(count, "identity").tone == tone
+
+
+@pytest.mark.parametrize("category", TARGET_CATEGORIES)
+def test_every_cortex_category_is_handled(category: str) -> None:
+    """Every category in cortex's shared taxonomy has a bias, size guide and label.
+
+    A new cortex category would otherwise only surface as a KeyError on the
+    first manifest that used it.
+    """
+    assert category in TRAINING_BIAS
+    assert category in DATASET_SIZE_GUIDE
+    assert category in CATEGORY_LABELS
+    assert suggest_training_params(25, category).images == 25  # type: ignore[arg-type]
+    assert dataset_size_status(25, category).tone in {"low", "good", "high"}  # type: ignore[arg-type]
+
+
+def test_tables_have_no_stale_categories() -> None:
+    for table in (TRAINING_BIAS, DATASET_SIZE_GUIDE, CATEGORY_LABELS):
+        assert set(table) == set(TARGET_CATEGORIES)

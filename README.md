@@ -97,10 +97,12 @@ docker run --rm --init --gpus all --shm-size=8g \
 
 ```bash
 argus-forge inspect /data/out                          # what's in this export?
+argus-forge inspect /data/out --category concept       # ...judged as a style / concept LoRA
 argus-forge config /data/out --trainer kohya           # emit configs
 argus-forge config /data/out -t diffusers --dry-run    # preview without writing
 argus-forge config /data/out --trigger "zxq person" --network-dim 32 --epochs 8
 argus-forge trainers                                   # list emitters
+argus-forge schema                                     # write the wire-contract JSON Schema
 argus-forge run /data/out --trainer kohya \
   --env SD_SCRIPTS_DIR=~/kohya-ss/sd-scripts             # run the forged train.sh, streaming progress
 ```
@@ -110,12 +112,30 @@ driven from its own UI) and streams the trainer's output. It exits with the
 trainer's own exit code, so it slots into scripts and CI; `--dry-run` prints the
 command without executing, and `--json` streams raw NDJSON `RunEvent`s.
 
+`--category` overrides the manifest's target category. The values are argus-cortex's shared taxonomy
+(`identity`, `wardrobe`, `pose_composition`, `setting`, `concept`), and each one sets its own step budget,
+network size and dataset-size guidance.
+
+`schema` writes the JSON Schema for forge's wire contract (the `/inspect`, `/config` and `/run` request and
+response types, plus the manifest row), so a client can generate types from it rather than copying them by
+hand. It writes to [`schema/forge-wire.schema.json`](schema/forge-wire.schema.json) by default (`-o` to
+choose another path); `--check` exits non-zero if that file no longer matches the code, which is what CI runs.
+
 ## Server (argus-studio integration)
 
 Start the FastAPI micro-server on **:8103** (peer to lens :8100, curator :8101, quarry :8102):
 
 ```bash
 argus-forge serve --cors --export-root /data/out
+```
+
+`serve` listens on `--host 0.0.0.0 --port 8103` by default, which is **every interface**, with `POST /run`
+enabled. Forge has no authentication, and [reaching an enabled `/run` is equivalent to shell
+access](#demo-safe-mode-no-training), so unless the network is trusted, pass `--host 127.0.0.1` (studio on
+the same machine), `--no-run` (configs only), or both:
+
+```bash
+argus-forge serve --host 127.0.0.1 --cors --export-root /data/out
 ```
 
 `--export-root` is **required** by the API: a request's `export_dir` is untrusted, so it must name a
@@ -188,10 +208,13 @@ So a host that should render configs but never train — a public demo, a box wi
 argus-forge serve --cors --no-run       # or: ARGUS_FORGE_READONLY=1 argus-forge serve --cors
 ```
 
-`/inspect` and `/config` keep working; every `/run` route refuses with **403** and a message saying training
-is disabled on this host. The refusal is middleware, so it lands *before* the request body is validated —
-on such a host a malformed request deserves the same answer as a well-formed one — and it covers `/run`
-routes added later without a per-route guard to forget.
+`/inspect` and `/config` keep working. Every state-changing request (POST, PUT, PATCH, DELETE) to `/run` or a
+path under `/run/` is refused with **403** and a message saying training is disabled on this host. Today
+that is `POST /run` and `POST /run/{id}/cancel`. Reads are not refused: `GET /runs` returns an empty list
+and `GET /run/{id}` and `GET /run/{id}/stream` return 404, since no run can ever start. The refusal is
+middleware, so it lands *before* the request body is validated (on such a host a malformed request deserves
+the same answer as a well-formed one), and it covers `/run` routes added later without a per-route guard to
+forget.
 
 Demo-safe also means **write**-safe: `POST /config` is forced to `dry_run`, so it renders and returns the
 files but never touches the volume, and says so in `warnings` — a caller that asked for a real write learns
@@ -245,6 +268,9 @@ make lint
   `/run` validation path (`run --dry-run`). CI has no GPU, so **no actual training step runs** — a `-train`
   tag is honest about building and validating, not e2e-verified; the first real `accelerate launch` happens
   on your GPU host.
+- Once the wheel is on PyPI, the same run creates the **GitHub Release** for the tag. Its notes are that
+  version's `CHANGELOG.md` section, and the run fails if the section is missing. The built wheel and sdist
+  are attached, and tags like `-rc1`, `a1` or `b1` are marked as pre-releases.
 - Versioning is derived from git tags via `hatch-vcs` — tag `vX.Y.Z` to cut a release.
 
 This repo was scaffolded from [`argus-pkg-template`](https://github.com/smk762/argus-pkg-template).

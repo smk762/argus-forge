@@ -38,6 +38,10 @@ TRAINING_BIAS: dict[TargetCategory, CategoryBias] = {
     "wardrobe": CategoryBias(target_steps=1600, dim=16, alpha=8),
     "pose_composition": CategoryBias(target_steps=1800, dim=32, alpha=16),
     "setting": CategoryBias(target_steps=2000, dim=32, alpha=16),
+    # A style / visual concept is spread across the whole frame and many
+    # subjects, so it trains like a scene set: the longest schedule and the
+    # wider network. Forge set these first; studio's types.ts follows.
+    "concept": CategoryBias(target_steps=2000, dim=32, alpha=16),
 }
 
 
@@ -53,6 +57,9 @@ DATASET_SIZE_GUIDE: dict[TargetCategory, SizeGuide] = {
     "wardrobe": SizeGuide(ideal="20–40", low=15, hi=60),
     "pose_composition": SizeGuide(ideal="20–40", low=15, hi=60),
     "setting": SizeGuide(ideal="25–50", low=15, hi=80),
+    # Style needs the most variety: too few images and the LoRA learns the
+    # subjects instead of the look.
+    "concept": SizeGuide(ideal="30–60", low=20, hi=100),
 }
 
 CATEGORY_LABELS: dict[TargetCategory, str] = {
@@ -60,6 +67,7 @@ CATEGORY_LABELS: dict[TargetCategory, str] = {
     "wardrobe": "Wardrobe",
     "pose_composition": "Pose / Composition",
     "setting": "Setting",
+    "concept": "Concept / Style",
 }
 
 

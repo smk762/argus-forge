@@ -7,7 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-13
+
+The first release since 0.1.1. On the image side it adds the `-train` variant
+and the image rebuild that a new argus-cortex release triggers. In the package,
+the target taxonomy now comes from argus-cortex, which adds the `concept`
+category, and every tag now gets a GitHub Release.
+
 ### Added
+
+- **`concept` target category** (style / visual-concept LoRAs, issue #28). Its
+  training defaults are the same as `setting`: about 2000 total steps,
+  `network_dim` 32 and `network_alpha` 16. Its dataset-size guide is ~30–60
+  images (light below 20, large above 100). A style needs the most variety,
+  otherwise the LoRA learns the subjects instead of the look. argus-studio's
+  `types.ts` twin of these tables does not have `concept` yet and needs the same
+  values added.
+
+- **A GitHub Release for every tag** (issue #26). `release.yml` creates it once
+  the wheel is on PyPI. The notes are that version's `CHANGELOG.md` section (the
+  run fails if it is missing), the wheel and sdist are attached, and
+  `-`/`rc`/`a<n>`/`b<n>` tags are marked as pre-releases. Re-running the workflow
+  updates the existing Release instead of failing.
 
 - **A new argus-cortex rebuilds the published image.** `release.yml` also runs on
   the `cortex-released` dispatch argus-cortex's release sends: only the image job runs,
@@ -27,6 +48,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`scripts/smoke-train-image.sh`: serve + trainer-stack imports + the
   `prepare_run` validation path); CI has no GPU, so a `-train` tag is
   explicitly not e2e-trained.
+
+### Changed
+
+- **`TargetProfile`, `TargetCategory` and `TargetStyle` come from
+  `argus_cortex.taxonomy`** (issue #28), replacing forge's own copy. They are
+  still importable from `argus_forge.models`. `argus-cortex>=0.4.7` is now a core
+  dependency (it pulls only pydantic), and the `[server]` extra's floor is raised
+  to match. The wire schema's `TargetProfile` gains `concept` and cortex's
+  docstring. `--category` help on `config` and `inspect` now lists the values
+  from the taxonomy.
+
+### Documentation
+
+- README (issue #33): `serve` binds `0.0.0.0:8103` by default with `/run`
+  enabled, so the README now says to use `--host 127.0.0.1` or `--no-run`
+  unless the network is trusted. It also documents `argus-forge schema`, and
+  demo-safe mode now lists exactly what it refuses: unsafe methods on `/run` and
+  `/run/...`, while `GET /runs` and `GET /run/{id}` still answer.
+
+### Fixed
+
+- **The `cortex-released` image rebuild no longer fails on a tag older than its
+  workflow.** The dispatch runs `release.yml` from the default branch but builds
+  the newest release tag's Dockerfile, and v0.1.1's Dockerfile predates the named
+  `runtime` and `train` stages, so both image jobs failed with `target stage
+  "runtime"/"train" could not be found` (seen on `main` and on `dev`). The
+  `release-tag` job now reads the tag's Dockerfile: without a `runtime` stage the
+  thin image is built from the default (last) stage, which is the same image the
+  old Dockerfile shipped; without a `train` stage the train job skips with a
+  notice, since that tag never had a `-train` image.
+
+### Security
+
+- **Images no longer trust the compromised emSign ECC Root CA - G3** (the
+  eMudhra CA incident). The build uses uv 0.13.5, which drops that root, and
+  requires `certifi>=2026.10.19` in both images. The base image's pip, which is
+  copied into the runtime image, is replaced with a hash-pinned pip 26.2.2.
+  The system CA config marks the emSign G3 and Comodo AAA roots as distrusted.
+  Debian's current `ca-certificates` doesn't ship either one, so that step
+  only matters if a later package adds them back.
+
+## [0.1.1] - 2026-07-22
+
+Tagged without a changelog heading at the time; these notes were under
+`[Unreleased]` until the 0.2.0 notes were written.
 
 ### Removed
 
@@ -84,9 +150,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under a cursor than under a queue: the deque keeps nothing while `_published`
   runs away from it, so a clamped cursor indexes off the end and `/stream`
   raises `IndexError` mid-response instead of merely returning an empty body.
-
-### Fixed
-
+- A TestPyPI failure no longer withholds the real PyPI release. `publish-pypi`
+  still runs after the TestPyPI rehearsal, but it is gated only on the build and
+  install checks. A TestPyPI fault still fails the run. The `dev` extra adds
+  `httpx2`, which starlette's `TestClient` needs.
 - `Job.cancel()` no longer returns early when another cancel is in flight; it
   waits for it. `JobRegistry.shutdown()` could otherwise report every trainer
   reaped while a request-side cancel was still inside `runner._terminate`'s
@@ -265,5 +332,7 @@ First tagged release — the version that publishes `ghcr.io/smk762/argus-forge`
   literal string `latest` for a non-semver `v*` tag; and `latest` is no longer
   repointed by a prerelease tag.
 
-[Unreleased]: https://github.com/smk762/argus-forge/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/smk762/argus-forge/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/smk762/argus-forge/compare/v0.1.1...v0.2.0
+[0.1.1]: https://github.com/smk762/argus-forge/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/smk762/argus-forge/releases/tag/v0.1.0

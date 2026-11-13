@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - TBD
+
+The first release since 0.1.1, and an image release: no Python source changed
+since 0.1.1, so the wheel differs only in its version. What's new is the
+`-train` image variant and the image rebuild that a new argus-cortex release
+triggers. Set the date when the tag is cut.
+
 ### Added
 
 - **A new argus-cortex rebuilds the published image.** `release.yml` also runs on
@@ -27,6 +34,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`scripts/smoke-train-image.sh`: serve + trainer-stack imports + the
   `prepare_run` validation path); CI has no GPU, so a `-train` tag is
   explicitly not e2e-trained.
+
+### Fixed
+
+- **The `cortex-released` image rebuild no longer fails on a tag older than its
+  workflow.** The dispatch runs `release.yml` from the default branch but builds
+  the newest release tag's Dockerfile, and v0.1.1's Dockerfile predates the named
+  `runtime` and `train` stages, so both image jobs failed with `target stage
+  "runtime"/"train" could not be found` (seen on `main` and on `dev`). The
+  `release-tag` job now reads the tag's Dockerfile: without a `runtime` stage the
+  thin image is built from the default (last) stage, which is the same image the
+  old Dockerfile shipped; without a `train` stage the train job skips with a
+  notice, since that tag never had a `-train` image.
+
+## [0.1.1] - 2026-07-22
+
+Tagged without a changelog heading at the time; these notes were under
+`[Unreleased]` until the 0.2.0 notes were written.
 
 ### Removed
 
@@ -84,9 +108,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under a cursor than under a queue: the deque keeps nothing while `_published`
   runs away from it, so a clamped cursor indexes off the end and `/stream`
   raises `IndexError` mid-response instead of merely returning an empty body.
-
-### Fixed
-
+- A TestPyPI failure no longer withholds the real PyPI release. `publish-pypi`
+  still runs after the TestPyPI rehearsal, but it is gated only on the build and
+  install checks. A TestPyPI fault still fails the run. The `dev` extra adds
+  `httpx2`, which starlette's `TestClient` needs.
 - `Job.cancel()` no longer returns early when another cancel is in flight; it
   waits for it. `JobRegistry.shutdown()` could otherwise report every trainer
   reaped while a request-side cancel was still inside `runner._terminate`'s
@@ -265,5 +290,7 @@ First tagged release — the version that publishes `ghcr.io/smk762/argus-forge`
   literal string `latest` for a non-semver `v*` tag; and `latest` is no longer
   repointed by a prerelease tag.
 
-[Unreleased]: https://github.com/smk762/argus-forge/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/smk762/argus-forge/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/smk762/argus-forge/compare/v0.1.1...v0.2.0
+[0.1.1]: https://github.com/smk762/argus-forge/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/smk762/argus-forge/releases/tag/v0.1.0

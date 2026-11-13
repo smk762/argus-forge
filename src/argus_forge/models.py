@@ -6,9 +6,9 @@ row per selected image, each row stamped with ``manifest_version`` and the
 shared :class:`TargetProfile`); its output contract is :class:`ForgeResult`
 (the trainer-native files it rendered plus the resolved hyperparameters).
 
-``TargetProfile`` / ``TargetCategory`` mirror ``argus_curator.models``
-verbatim — same taxonomy, no remapping (or, eventually, hoist both into a
-shared ``argus-core`` package).
+``TargetProfile`` / ``TargetCategory`` / ``TargetStyle`` are argus-cortex's
+shared taxonomy (``argus_cortex.taxonomy``), re-exported here — the same
+literals every suite stage uses, no local copy to drift.
 """
 
 from __future__ import annotations
@@ -16,10 +16,15 @@ from __future__ import annotations
 from pathlib import PurePosixPath
 from typing import Literal
 
+# Re-exported: the rest of forge (and consumers) import the taxonomy from here.
+from argus_cortex.taxonomy import (  # noqa: F401
+    TARGET_CATEGORIES,
+    TARGET_STYLES,
+    TargetCategory,
+    TargetProfile,
+    TargetStyle,
+)
 from pydantic import BaseModel, Field, model_validator
-
-TargetStyle = Literal["photo", "anime"]
-TargetCategory = Literal["identity", "wardrobe", "pose_composition", "setting"]
 
 TrainerId = Literal["kohya", "onetrainer", "diffusers"]
 
@@ -79,15 +84,6 @@ SERVER_ENV_VARS: tuple[str, ...] = (
 
 class ForgeError(RuntimeError):
     """A user-facing failure: bad input dir, unreadable manifest, bad request."""
-
-
-class TargetProfile(BaseModel):
-    """What the dataset was curated *for* — inherited verbatim from argus-curator."""
-
-    target_style: TargetStyle = "photo"
-    target_backend: str | None = "sdxl"
-    checkpoint: str | None = None
-    target_category: TargetCategory = "identity"
 
 
 class ManifestRow(BaseModel):

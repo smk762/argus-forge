@@ -9,12 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0] - TBD
 
-The first release since 0.1.1, and an image release: no Python source changed
-since 0.1.1, so the wheel differs only in its version. What's new is the
-`-train` image variant and the image rebuild that a new argus-cortex release
-triggers. Set the date when the tag is cut.
+The first release since 0.1.1. On the image side it adds the `-train` variant
+and the image rebuild that a new argus-cortex release triggers. In the package,
+the target taxonomy now comes from argus-cortex, which adds the `concept`
+category, and every tag now gets a GitHub Release. Set the date when the tag is
+cut.
 
 ### Added
+
+- **`concept` target category** (style / visual-concept LoRAs, issue #28). Its
+  training defaults are the same as `setting`: about 2000 total steps,
+  `network_dim` 32 and `network_alpha` 16. Its dataset-size guide is ~30–60
+  images (light below 20, large above 100). A style needs the most variety,
+  otherwise the LoRA learns the subjects instead of the look. argus-studio's
+  `types.ts` twin of these tables does not have `concept` yet and needs the same
+  values added.
+
+- **A GitHub Release for every tag** (issue #26). `release.yml` creates it once
+  the wheel is on PyPI. The notes are that version's `CHANGELOG.md` section (the
+  run fails if it is missing), the wheel and sdist are attached, and
+  `-`/`rc`/`a<n>`/`b<n>` tags are marked as pre-releases. Re-running the workflow
+  updates the existing Release instead of failing.
 
 - **A new argus-cortex rebuilds the published image.** `release.yml` also runs on
   the `cortex-released` dispatch argus-cortex's release sends: only the image job runs,
@@ -34,6 +49,24 @@ triggers. Set the date when the tag is cut.
   (`scripts/smoke-train-image.sh`: serve + trainer-stack imports + the
   `prepare_run` validation path); CI has no GPU, so a `-train` tag is
   explicitly not e2e-trained.
+
+### Changed
+
+- **`TargetProfile`, `TargetCategory` and `TargetStyle` come from
+  `argus_cortex.taxonomy`** (issue #28), replacing forge's own copy. They are
+  still importable from `argus_forge.models`. `argus-cortex>=0.4.7` is now a core
+  dependency (it pulls only pydantic), and the `[server]` extra's floor is raised
+  to match. The wire schema's `TargetProfile` gains `concept` and cortex's
+  docstring. `--category` help on `config` and `inspect` now lists the values
+  from the taxonomy.
+
+### Documentation
+
+- README (issue #33): `serve` binds `0.0.0.0:8103` by default with `/run`
+  enabled, so the README now says to use `--host 127.0.0.1` or `--no-run`
+  unless the network is trusted. It also documents `argus-forge schema`, and
+  demo-safe mode now lists exactly what it refuses: unsafe methods on `/run` and
+  `/run/...`, while `GET /runs` and `GET /run/{id}` still answer.
 
 ### Fixed
 

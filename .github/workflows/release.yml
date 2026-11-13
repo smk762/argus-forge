@@ -88,6 +88,52 @@ jobs:
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
 
+  github-release:
+    # The GitHub Release is the last step, so it only appears once the version is
+    # actually on PyPI. Its notes are this version's CHANGELOG.md section.
+    runs-on: ubuntu-latest
+    needs: publish-pypi
+    # Explicit rather than the implicit success(): that also requires every
+    # *transitive* need to succeed, so a TestPyPI-only failure — which
+    # publish-pypi deliberately tolerates — would silently skip the Release for
+    # a version that is live on PyPI. On a cortex dispatch publish-pypi is
+    # skipped, so this is too: that tag's Release already exists.
+    if: "!cancelled() && needs.publish-pypi.result == 'success'"
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # The section runs to the next `## [` heading, or to the link
+          # references at the foot of the file for the oldest one.
+          awk -v head="## [${version}]" \
+            'index($0, head) == 1 {found = 1; next} found && (/^## \[/ || /^\[[^]]+\]: /) {exit} found' \
+            CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::error::CHANGELOG.md has no section for ${version}"
+            exit 1
+          fi
+      - name: Create or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          prerelease=""
+          case "$tag" in *-*|*rc*|*a[0-9]*|*b[0-9]*) prerelease="--prerelease" ;; esac
+          if gh release view "$tag" >/dev/null 2>&1; then
+            # Re-run of the workflow: refresh notes and assets rather than failing.
+            gh release edit "$tag" --notes-file notes.md
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" dist/* --verify-tag --title "$tag" --notes-file notes.md $prerelease
+          fi
+
   release-tag:
     # The tag the image jobs build: the pushed one, or on a cortex dispatch the
     # newest final release. A pre-release never moved `latest`, so a dispatch

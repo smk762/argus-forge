@@ -7,13 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.2.0] - TBD
+## [0.2.0] - 2026-11-13
 
 The first release since 0.1.1. On the image side it adds the `-train` variant
 and the image rebuild that a new argus-cortex release triggers. In the package,
 the target taxonomy now comes from argus-cortex, which adds the `concept`
-category, and every tag now gets a GitHub Release. Set the date when the tag is
-cut.
+category, and every tag now gets a GitHub Release.
 
 ### Added
 

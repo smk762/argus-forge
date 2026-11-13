@@ -9,7 +9,8 @@ import sys
 from pathlib import Path
 
 import structlog
-from argus_cortex.taxonomy import TARGET_CATEGORIES
+
+from argus_forge.models import TARGET_CATEGORIES
 
 try:
     import typer

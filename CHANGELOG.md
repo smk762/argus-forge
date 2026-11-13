@@ -79,6 +79,16 @@ category, and every tag now gets a GitHub Release.
   old Dockerfile shipped; without a `train` stage the train job skips with a
   notice, since that tag never had a `-train` image.
 
+### Security
+
+- **Images no longer trust the compromised emSign ECC Root CA - G3** (the
+  eMudhra CA incident). The build uses uv 0.13.5, which drops that root, and
+  requires `certifi>=2026.10.19` in both images. The base image's pip, which is
+  copied into the runtime image, is replaced with a hash-pinned pip 26.2.2.
+  The system CA config marks the emSign G3 and Comodo AAA roots as distrusted.
+  Debian's current `ca-certificates` doesn't ship either one, so that step
+  only matters if a later package adds them back.
+
 ## [0.1.1] - 2026-07-22
 
 Tagged without a changelog heading at the time; these notes were under

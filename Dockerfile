@@ -4,9 +4,18 @@ FROM python:3.11-slim AS builder
 # Pinned — a moving :latest would resolve independently at each of the three
 # sites that name this image (here and the train stage's two RUN mounts), so
 # stages could silently build with different uv versions. Bump all three together.
-COPY --from=ghcr.io/astral-sh/uv:0.11.31 /uv /uvx /bin/
+# 0.13.5 drops emSign ECC Root CA - G3 and rejects the compromised eMudhra
+# intermediate keys.
+# https://discuss.python.org/t/information-for-python-users-regarding-emudhra-emsign-ca-certificate-security-incident/109576
+COPY --from=ghcr.io/astral-sh/uv:0.13.5 /uv /uvx /bin/
 
 WORKDIR /app
+
+# Hash-pinned pip: uv installs the app, but the base image's pip is copied into
+# the runtime stage with site-packages and would keep trusting emSign G3.
+# Above COPY/ARG so a source change or a release VERSION doesn't re-download it.
+RUN python -m pip install --no-cache-dir \
+    "pip @ https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl#sha256=fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70"
 
 # The base image has no `git`, so hatch-vcs can't derive the version from
 # history — hand it in via the VERSION build arg (the release tag, sans "v").
@@ -26,9 +35,22 @@ COPY . /app
 # The cache mount keeps wheel downloads across builds even when this layer runs.
 RUN --mount=type=cache,target=/root/.cache/uv \
     SETUPTOOLS_SCM_PRETEND_VERSION="${VERSION}" \
-    uv pip install --system ".[server,cli]"
+    uv pip install --system "certifi>=2026.10.19" ".[server,cli]"
 
 FROM python:3.11-slim AS runtime-base
+
+# Runtime TLS (urllib / truststore) uses this bundle, not uv's. Debian's package
+# may still ship emSign ECC Root CA - G3; distrust it and the Comodo AAA
+# cross-sign root. Unaffected emSign roots stay enabled.
+# https://discuss.python.org/t/information-for-python-users-regarding-emudhra-emsign-ca-certificate-security-incident/109576
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && sed -i \
+        -e 's|^mozilla/emSign_ECC_Root_CA_-_G3|!mozilla/emSign_ECC_Root_CA_-_G3|' \
+        -e 's|^mozilla/Comodo_AAA|!mozilla/Comodo_AAA|' \
+        /etc/ca-certificates.conf \
+    && update-ca-certificates --fresh >/dev/null \
+    && rm -rf /var/lib/apt/lists/*
 
 # Only the installed package and its console script — uv (~64 MB of the old
 # single-stage image) is a build tool and never runs here.
@@ -89,7 +111,11 @@ RUN apt-get update \
 # cache key, so hoisting it above would re-bust this layer on every bump. The
 # pin is what sd-scripts v0.11.1 recommends — re-check it whenever the SHA
 # moves. uv is mounted, not installed: same build-tool hygiene as the builder.
-RUN --mount=from=ghcr.io/astral-sh/uv:0.11.31,source=/uv,target=/bin/uv \
+# No certifi pin here: --index-url makes the cu124 index the only source and it
+# carries only certifi 2022.12.7, so the pin would be unsatisfiable. torch does
+# not pull certifi; the builder's pinned copy (inherited via site-packages) and
+# the sd-scripts constraint below cover it.
+RUN --mount=from=ghcr.io/astral-sh/uv:0.13.5,source=/uv,target=/bin/uv \
     --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system torch==2.6.0 torchvision==0.21.0 \
       --index-url https://download.pytorch.org/whl/cu124
@@ -113,9 +139,9 @@ RUN mkdir -p /opt/sd-scripts \
 # pins conflicted with 2.6.0 would otherwise silently swap in a PyPI wheel —
 # better a loud resolver error here than a wrong-CUDA torch discovered on a
 # GPU host. (The smoke test asserts the same pins from the run side.)
-RUN --mount=from=ghcr.io/astral-sh/uv:0.11.31,source=/uv,target=/bin/uv \
+RUN --mount=from=ghcr.io/astral-sh/uv:0.13.5,source=/uv,target=/bin/uv \
     --mount=type=cache,target=/root/.cache/uv \
-    printf 'torch==2.6.0+cu124\ntorchvision==0.21.0+cu124\n' > /tmp/torch-pin.txt \
+    printf 'torch==2.6.0+cu124\ntorchvision==0.21.0+cu124\ncertifi>=2026.10.19\n' > /tmp/torch-pin.txt \
     && cd /opt/sd-scripts && uv pip install --system -c /tmp/torch-pin.txt -r requirements.txt \
     && rm /tmp/torch-pin.txt
 

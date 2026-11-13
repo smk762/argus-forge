@@ -1,10 +1,10 @@
 name: Suite
 on:
   push:
-    branches: [main]
+    branches: [dev, main]
     tags: ["v*"]
   pull_request:
-    branches: [main]
+    branches: [dev, main]
 
 jobs:
   suite:

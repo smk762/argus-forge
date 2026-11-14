@@ -1,4 +1,9 @@
-# argus-forge
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/smk762/argus-cortex/dev/brand/packages/forge/argus-forge-lockup-dark.svg">
+    <img alt="argus-forge" src="https://raw.githubusercontent.com/smk762/argus-cortex/dev/brand/packages/forge/argus-forge-lockup-light.svg" height="52">
+  </picture>
+</h1>
 
 Training bridge: turn curated dataset exports into ready-to-run LoRA training configs (kohya_ss / OneTrainer / diffusers).
 

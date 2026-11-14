@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- README: the symlinked-root example uses a placeholder host path (`/mnt/<NAS>/out`)
+
 ## [0.2.0] - 2026-11-13
 
 The first release since 0.1.1. On the image side it adds the `-train` variant

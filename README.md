@@ -152,7 +152,7 @@ Without the fence, `POST /config` would forge a tree into any directory the call
 Containment is decided on the fully resolved path, so a symlink pointing out of the root is refused rather
 than followed, and the root itself is not a valid `export_dir` (a blank field would otherwise mean "treat
 the whole shared volume as one dataset"). The path handed to the emitters keeps *your* spelling, though —
-`path_map` prefixes are matched against it, so a symlinked root like `/data/out -> /mnt/big/out` still
+`path_map` prefixes are matched against it, so a symlinked root like `/data/out -> /mnt/<NAS>/out` still
 rewrites correctly. The manifest's `abs_path` caption sources are fenced to the same root: forge will not
 copy a sidecar from outside it into your dataset.
 

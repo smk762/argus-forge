@@ -38,6 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- README: the GPU host in the iris and `FORGE_TRUSTED_HOSTS` examples is the `<GPU_HOST>` placeholder, so the
+  argus-handbook docs sync passes its opsec gate again.
 - A run's `env` is an allowlist now (`SD_SCRIPTS_DIR`, `DIFFUSERS_SCRIPT`, `CUDA_VISIBLE_DEVICES`, `HF_HOME`,
   `HF_HUB_OFFLINE`). The old blocklist missed `LD_LIBRARY_PATH`, `PYTHONPATH`, `PYTHONSTARTUP` and other hooks that
   change what code runs. Any other key is refused with 400. The trainer no longer inherits `ARGUS_GPU_BROKER_TOKEN`,

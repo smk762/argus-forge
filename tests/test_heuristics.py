@@ -61,6 +61,17 @@ def test_dataset_size_status_tones(count: int, tone: str) -> None:
     assert dataset_size_status(count, "identity").tone == tone
 
 
+def test_good_outside_the_ideal_band_is_workable_not_the_sweet_spot() -> None:
+    """Inside low..hi but outside the ideal band is still good, but not "in the sweet spot" (studio's wording)."""
+    assert dataset_size_status(25, "concept").text == (
+        "25 selected — workable for an SDXL Concept / Style LoRA; the sweet spot is ~30–60."
+    )
+    assert dataset_size_status(45, "concept").text == (
+        "45 selected — in the ~30–60 sweet spot for an SDXL Concept / Style LoRA."
+    )
+    assert dataset_size_status(41, "identity").tone == "good"
+
+
 @pytest.mark.parametrize("category", TARGET_CATEGORIES)
 def test_every_cortex_category_is_handled(category: str) -> None:
     """Every category in cortex's shared taxonomy has a bias, size guide and label.

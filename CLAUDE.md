@@ -45,7 +45,7 @@ import or API) belongs in argus-ci's `suite-rules/` catalogue rather than a test
 | Pair a caption with the wrong image on a basename collision (leave it uncaptioned) | `test_emitters::test_basename_collision_warns_and_skips_caption` |
 | Emit an unmapped container path into a config the host trainer reads | `test_emitters::test_no_unmapped_container_path_escapes_any_emitter` |
 | Emit a kohya config that trains zero images from a structure-preserving export (one subset per image dir) | `test_emitters::test_kohya_nested_export_gets_subset_per_directory` |
-| Let heuristics or the kohya emitter drift from argus-studio's twins (`types.ts` `suggestTrainingParams`, `forgeDemo.ts`) | **Partial**: `test_heuristics::test_suggest_training_params_parity` and `test_kohya_parity` pin forge's side to hardcoded cases and goldens; studio's side is unchecked ([#45](https://github.com/smk762/argus-forge/issues/45)) |
+| Let heuristics or the kohya emitter drift from argus-studio's twins (`types.ts` `suggestTrainingParams` / `datasetSizeStatus`, `forgeDemo.ts`) | `test_studio_parity::test_parity_fixture_is_current` keeps `schema/forge-parity.json` in step with the code; argus-studio pins that file and `forgeParity.test.ts` checks its twins against it (its daily wire-drift job re-pulls it from `dev`). Regenerate with `UPDATE_PARITY=1` and change studio's twins along with it |
 | Re-implement something argus-cortex provides | `test_rules::test_forge_does_not_reimplement_cortex` (same-named functions and classes; a thin wrapper must import the original) |
 
 ## Facts the code doesn't make obvious

@@ -136,4 +136,11 @@ def dataset_size_status(count: int, category: TargetCategory) -> SizeHint:
             tone="high",
             text=f"{count} selected — more than needed. Trimming to your best ~{g.ideal} keeps the concept clean.",
         )
-    return SizeHint(tone="good", text=f"{count} selected — in the ~{g.ideal} sweet spot for an SDXL {label} LoRA.")
+    # "Good" spans low..hi; only the ideal band inside it is the sweet spot.
+    lo, hi = (int(x) for x in g.ideal.split("–"))
+    if lo <= count <= hi:
+        return SizeHint(tone="good", text=f"{count} selected — in the ~{g.ideal} sweet spot for an SDXL {label} LoRA.")
+    return SizeHint(
+        tone="good",
+        text=f"{count} selected — workable for an SDXL {label} LoRA; the sweet spot is ~{g.ideal}.",
+    )

@@ -38,6 +38,10 @@ import or API) belongs in argus-ci's `suite-rules/` catalogue rather than a test
 | Accept a cross-site write, including under `--cors-any` | `test_server::test_cross_site_write_is_refused`, `::test_wildcard_still_refuses_cross_site_writes` |
 | Let a caller's env redirect what `/run` executes (`BASH_ENV`, `ENV`, `LD_PRELOAD`, `LD_AUDIT`, `PATH`) | `test_runner::test_prepare_run_rejects_exec_hijacking_env` |
 | Leave a trainer running after its run is cancelled | `test_runner::test_cancelled_run_kills_the_process`, `test_jobs::test_double_cancel_does_not_orphan_the_trainer` |
+| Start a trainer without its GPU lease, or after the lease was refused or timed out | `test_gpu::test_run_takes_an_exclusive_background_lease`, `::test_lease_not_granted_is_an_error_and_nothing_runs` |
+| Send a run's terminal event while still holding its GPU lease | `test_gpu::test_lease_is_released_before_the_terminal_event` |
+| Report a failed or OOM run to the broker as `ok` | `test_gpu::test_failed_run_is_reported_to_the_coordinator`, `::test_through_cortex_broker_client` |
+| Let `gpu-tenant.yaml` drift from the lease the runner takes | `test_gpu::test_manifest_validates_and_matches_the_lease` |
 | Pair a caption with the wrong image on a basename collision (leave it uncaptioned) | `test_emitters::test_basename_collision_warns_and_skips_caption` |
 | Emit an unmapped container path into a config the host trainer reads | `test_emitters::test_no_unmapped_container_path_escapes_any_emitter` |
 | Emit a kohya config that trains zero images from a structure-preserving export (one subset per image dir) | `test_emitters::test_kohya_nested_export_gets_subset_per_directory` |
@@ -56,6 +60,9 @@ import or API) belongs in argus-ci's `suite-rules/` catalogue rather than a test
 - kohya's image glob doesn't recurse, which is why it gets one subset per directory.
 - A new trainer is a module in `emitters/` registered in `emitters/__init__.py`; it is runnable only if its
   `TrainerInfo.entrypoint` is set.
+- A run's GPU lease comes from argus-cortex's coordinator (`gpu.py`); `ARGUS_GPU_COORDINATOR` unset means `none`, so
+  runs start at once. The lease size (`FORGE_GPU_VRAM_MB`, default 22000) is below the card's 24 GiB because iris keeps
+  per-node headroom; a full-card request could never be admitted.
 - Shared suite code (taxonomy, wire-schema building, the server write-guard and env-flag helpers) lives in
   **argus-cortex** (`argus-cortex[server]`).
 - Run one test: `uv run --no-sync pytest tests/test_core.py::test_name -q`. `make help` lists the rest; ruff is pinned

@@ -43,8 +43,8 @@ async def test_run_dry_run_does_not_execute(tmp_path: Path) -> None:
 
 
 async def test_run_passes_env_through(tmp_path: Path) -> None:
-    export = forge_stub(tmp_path, "kohya", 'echo "val=$FORGE_TEST_VAR"\n')
-    events = await _collect(RunRequest(export_dir=str(export), trainer="kohya", env={"FORGE_TEST_VAR": "xyz"}))
+    export = forge_stub(tmp_path, "kohya", 'echo "val=$HF_HOME"\n')
+    events = await _collect(RunRequest(export_dir=str(export), trainer="kohya", env={"HF_HOME": "xyz"}))
     assert "val=xyz" in [e.message for e in events if e.type == "log"]
 
 
@@ -103,7 +103,7 @@ async def test_launch_failure_yields_terminal_error(tmp_path: Path) -> None:
     makes create_subprocess_exec raise ValueError), the stream ends with a
     terminal `error` event and no exception escapes."""
     export = forge_stub(tmp_path, "kohya", "echo hi\n")
-    events = await _collect(RunRequest(export_dir=str(export), trainer="kohya", env={"X": "a\x00b"}))
+    events = await _collect(RunRequest(export_dir=str(export), trainer="kohya", env={"HF_HOME": "a\x00b"}))
     assert events[0].type == "start"
     assert events[-1].type == "error"
     assert not any(e.type == "exit" for e in events)
@@ -122,10 +122,41 @@ def test_prepare_run_rejects_unrunnable_trainer(tmp_path: Path) -> None:
         prepare_run(RunRequest(export_dir=str(tmp_path), trainer="onetrainer"))
 
 
-def test_prepare_run_rejects_exec_hijacking_env(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "key",
+    [
+        "BASH_ENV",
+        "ENV",
+        "PATH",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "LD_AUDIT",
+        "PYTHONPATH",
+        "PYTHONSTARTUP",
+        "DYLD_INSERT_LIBRARIES",
+        "SHELLOPTS",
+        "PS4",
+    ],
+)
+def test_prepare_run_rejects_exec_hijacking_env(tmp_path: Path, key: str) -> None:
+    """Only the allowlisted keys pass: a loader, shell or interpreter hook would change what code runs."""
     export = forge_stub(tmp_path, "kohya", "echo hi\n")
-    with pytest.raises(ForgeError, match="BASH_ENV"):
-        prepare_run(RunRequest(export_dir=str(export), trainer="kohya", env={"BASH_ENV": "/tmp/evil.sh"}))
+    with pytest.raises(ForgeError, match=key):
+        prepare_run(RunRequest(export_dir=str(export), trainer="kohya", env={key: "/tmp/evil"}))
+
+
+def test_prepare_run_accepts_the_allowlisted_env(tmp_path: Path) -> None:
+    export = forge_stub(tmp_path, "kohya", "echo hi\n")
+    env = {"SD_SCRIPTS_DIR": "/opt/sd-scripts", "CUDA_VISIBLE_DEVICES": "0", "HF_HOME": "/cache"}
+    prepare_run(RunRequest(export_dir=str(export), trainer="kohya", env=env))
+
+
+async def test_trainer_does_not_inherit_suite_secrets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ARGUS_GPU_BROKER_TOKEN", "s3cret")
+    monkeypatch.setenv("FORGE_TEST_VISIBLE", "yes")
+    export = forge_stub(tmp_path, "kohya", 'echo "tok=${ARGUS_GPU_BROKER_TOKEN:-unset} vis=$FORGE_TEST_VISIBLE"\n')
+    events = await _collect(RunRequest(export_dir=str(export), trainer="kohya"))
+    assert "tok=unset vis=yes" in [e.message for e in events if e.type == "log"]
 
 
 def test_runnable_trainers_from_entrypoint() -> None:

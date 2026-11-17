@@ -9,9 +9,11 @@ Trust model: ``/run`` executes a script forge generated, on the shared dataset
 volume — the single-user LAN assumption of ``/config``. But note this is *not*
 sandboxed: the environment is caller-supplied and a trainer script runs real
 code, so treat reaching the port as equivalent to shell access on the host.
-:data:`BLOCKED_ENV_KEYS` refuses the env vars that would let a request silently
-redirect *what* runs (before the forged script); it is defence-in-depth, not a
-sandbox.
+A request's env may set only :data:`~argus_forge.models.RUN_ENV_KEYS` (where
+the trainer checkout lives, which GPU and model cache): every loader, shell and
+interpreter hook is refused. The child inherits the server's environment less
+the suite's own secrets (:data:`SECRET_ENV_KEYS`). This is defence-in-depth, not
+a sandbox.
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ from argus_cortex.gpu import GpuCoordinator
 from argus_forge import gpu
 from argus_forge.emitters import TRAINER_INFO
 from argus_forge.manifest import FORGE_DIR_NAME, resolve_export_dir
-from argus_forge.models import ForgeError, RunEvent, RunRequest
+from argus_forge.models import RUN_ENV_KEYS, ForgeError, RunEvent, RunRequest
 
 logger = structlog.get_logger()
 
@@ -39,12 +41,17 @@ logger = structlog.get_logger()
 # can't silently break runnability.
 RUNNABLE_TRAINERS: tuple[str, ...] = tuple(t for t, info in TRAINER_INFO.items() if info.entrypoint)
 
-# Env vars refused from caller-supplied env: each lets a request redirect what
-# executes before/instead of the forged script — bash sources BASH_ENV/ENV for
-# non-interactive shells, the dynamic loader honours LD_PRELOAD/LD_AUDIT, and
-# PATH decides which binary the bare name "bash" below even resolves to (set it
-# to a directory holding an attacker's ./bash and the forged script never runs).
-BLOCKED_ENV_KEYS: frozenset[str] = frozenset({"BASH_ENV", "ENV", "LD_PRELOAD", "LD_AUDIT", "PATH"})
+# The suite's own credentials in the server's environment. A trainer script
+# never needs them, and it runs third-party code (sd-scripts, pip packages), so
+# they are dropped from the environment it inherits.
+SECRET_ENV_KEYS: frozenset[str] = frozenset({"ARGUS_GPU_BROKER_TOKEN", "ARGUS_ADMIN_TOKEN", "AI_AUDIT_API_TOKEN"})
+
+
+def child_env(req: RunRequest) -> dict[str, str]:
+    """The trainer's environment: the server's own, less :data:`SECRET_ENV_KEYS`, plus the request's allowed keys."""
+    base = {k: v for k, v in os.environ.items() if k not in SECRET_ENV_KEYS}
+    return {**base, **req.env}
+
 
 # Bytes read per stdout pull. Reading in chunks (not readline) means no single
 # line can exceed a buffer limit, and carriage-return progress bars stream.
@@ -70,9 +77,11 @@ def prepare_run(req: RunRequest) -> tuple[list[str], str]:
     entrypoint = TRAINER_INFO[req.trainer].entrypoint
     if not entrypoint:
         raise ForgeError(f"trainer {req.trainer!r} has no launcher to run (runnable: {', '.join(RUNNABLE_TRAINERS)})")
-    blocked = sorted(k for k in req.env if k in BLOCKED_ENV_KEYS)
-    if blocked:
-        raise ForgeError(f"env may not set {', '.join(blocked)} — they redirect what code runs, not just where it runs")
+    refused = sorted(k for k in req.env if k not in RUN_ENV_KEYS)
+    if refused:
+        raise ForgeError(
+            f"env may not set {', '.join(refused)}: a run's env may set only {', '.join(sorted(RUN_ENV_KEYS))}"
+        )
     export_dir = resolve_export_dir(req.export_dir)
     script = export_dir / FORGE_DIR_NAME / req.trainer / entrypoint
     if not script.is_file():
@@ -199,7 +208,7 @@ async def astream_run(
                     run_id=run_id, type="log", message=f"[argus-forge] GPU lease granted via {lease.via}{where}"
                 )
             oom = False
-            async with contextlib.aclosing(_run_process(command, cwd, {**os.environ, **req.env}, run_id)) as events:
+            async with contextlib.aclosing(_run_process(command, cwd, child_env(req), run_id)) as events:
                 async for ev in events:
                     if ev.type == "log":
                         oom = oom or any(m in (ev.message or "") for m in _OOM_MARKERS)

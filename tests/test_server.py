@@ -139,7 +139,9 @@ def test_run_unrunnable_trainer_is_400(client: TestClient, tmp_path: Path) -> No
     assert "no launcher" in resp.json()["detail"]
 
 
-@pytest.mark.parametrize("key", ["LD_PRELOAD", "BASH_ENV", "ENV", "LD_AUDIT", "PATH"])
+@pytest.mark.parametrize(
+    "key", ["LD_PRELOAD", "BASH_ENV", "ENV", "LD_AUDIT", "PATH", "LD_LIBRARY_PATH", "PYTHONPATH", "PYTHONSTARTUP"]
+)
 def test_run_blocked_env_is_400(client: TestClient, tmp_path: Path, key: str) -> None:
     """Every key that redirects *what* runs, not just where. PATH belongs here:
     the command is the bare name "bash", so a caller-supplied PATH pointing at a
@@ -217,9 +219,9 @@ def test_failed_launch_reports_the_reason(client: TestClient, tmp_path: Path) ->
     """A run that can't be launched (NUL in an env value) surfaces why on the
     polled RunState, not only in the event stream."""
     export = forge_stub(tmp_path, "kohya", "echo hi\n")
-    run_id = client.post("/run", json={"export_dir": str(export), "trainer": "kohya", "env": {"X": "a\x00b"}}).json()[
-        "run_id"
-    ]
+    run_id = client.post(
+        "/run", json={"export_dir": str(export), "trainer": "kohya", "env": {"HF_HOME": "a\x00b"}}
+    ).json()["run_id"]
     final = _wait_terminal(client, run_id)
     assert final["status"] == "failed"
     assert final["message"] and "failed to launch" in final["message"]

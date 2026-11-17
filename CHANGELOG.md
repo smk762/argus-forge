@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **GPU lease for training, through argus-iris (#41).** Every run (`POST /run`, `argus-forge run`) holds one
+  lease from argus-cortex's GPU coordinator for the whole of `train.sh`. It is an exclusive whole-card lease:
+  kind `train`, `background` priority, not preemptible, pinned to morpheus, 22000 MiB (`FORGE_GPU_VRAM_MB`).
+  `ARGUS_GPU_COORDINATOR=broker` with `ARGUS_GPU_BROKER_URL`, `ARGUS_GPU_BROKER_TOKEN` and
+  `ARGUS_GPU_TENANT_MANIFEST` asks iris; when iris is unreachable or has no lease routes yet (it is
+  observe-only today) the lease comes from `ARGUS_GPU_BROKER_FALLBACK` (`lease` by default). The default
+  is `none`, which leaves runs as they were. A lease that is not granted ends the run in an `error` event
+  before anything runs. The lease is released before the terminal event, reporting the run's outcome (`ok`,
+  `failed`, `oom` or `cancelled`) and the peak VRAM sampled through NVML.
+- `gpu-tenant.yaml`, the tenant manifest iris registers. It is validated by cortex's `TenantManifest`, and
+  the image ships it at `/app/gpu-tenant.yaml`.
+- `gpu` extra (`argus-cortex[gpu,remote,yaml]`), installed in both images.
+- `FORGE_TRUSTED_HOSTS` (and `create_app(trusted_hosts=)`): the host names forge is reached by.
+
+### Changed
+
+- argus-cortex `>=0.6,<0.10` (was `>=0.4.7`). Since cortex 0.6, a write from a page on the server's own
+  host:port is refused when that host is a bare DNS name (DNS rebinding), unless the name is in
+  `FORGE_TRUSTED_HOSTS`. IP literals and `localhost` are unaffected.
+- docker-compose mounts the host-wide GPU lock dir (`ARGUS_GPU_LOCK_DIR`, default `/tmp/argus-gpu`) and passes the
+  `ARGUS_GPU_*` variables through.
+
 ### Fixed
 
 - README: the symlinked-root example uses a placeholder host path (`/mnt/<NAS>/out`)

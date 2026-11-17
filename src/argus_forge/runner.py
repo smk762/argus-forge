@@ -24,7 +24,9 @@ import uuid
 from collections.abc import AsyncIterator
 
 import structlog
+from argus_cortex.gpu import GpuCoordinator
 
+from argus_forge import gpu
 from argus_forge.emitters import TRAINER_INFO
 from argus_forge.manifest import FORGE_DIR_NAME, resolve_export_dir
 from argus_forge.models import ForgeError, RunEvent, RunRequest
@@ -144,19 +146,34 @@ def _signal_group(proc: asyncio.subprocess.Process, sig: int) -> None:
         os.killpg(os.getpgid(proc.pid), sig)
 
 
+class _RunFailed(Exception):
+    """Raised inside the GPU lease so the coordinator records a failed (or OOM) run, then swallowed."""
+
+
+# Trainer output that means the card ran out of memory; the broker learns from an `oom` release.
+_OOM_MARKERS = ("CUDA out of memory", "OutOfMemoryError", "CUBLAS_STATUS_ALLOC_FAILED")
+
+
 async def astream_run(
     req: RunRequest,
     *,
     run_id: str | None = None,
     resolved: tuple[list[str], str] | None = None,
+    coordinator: GpuCoordinator | None = None,
 ) -> AsyncIterator[RunEvent]:
     """Launch the forged trainer and yield its lifecycle + log events.
 
     Emits ``start`` (the resolved command), then one ``log`` per output line,
-    then a terminal event: ``error`` if the process could not be launched, else
-    ``exit`` with the return code. ``dry_run`` stops after ``start``. Every path
-    ends in exactly one terminal event, and the child's process group is always
-    reaped (finally), even on cancellation / consumer disconnect.
+    then a terminal event: ``error`` if the GPU lease was not granted or the
+    process could not be launched, else ``exit`` with the return code.
+    ``dry_run`` stops after ``start``. Every path ends in exactly one terminal
+    event, and the child's process group is always reaped (finally), even on
+    cancellation / consumer disconnect.
+
+    The trainer runs under a GPU lease from *coordinator* (default: the
+    environment's, see :mod:`argus_forge.gpu`; ``none`` when unset, which
+    grants at once). The lease is released *before* the terminal event is
+    yielded, so whoever acts on ``exit`` (an argus-proof eval) finds the GPU free.
 
     *resolved* is a pre-computed ``(command, cwd)`` (from :func:`prepare_run`)
     the server threads in to avoid re-validating; the CLI passes None.
@@ -168,7 +185,40 @@ async def astream_run(
     if req.dry_run:
         return
 
-    env = {**os.environ, **req.env}
+    coord = coordinator if coordinator is not None else gpu.coordinator()
+    gated = coord.name != "none"
+    if gated:
+        yield RunEvent(run_id=run_id, type="log", message=f"[argus-forge] waiting for a GPU lease ({coord.name})")
+
+    terminal: RunEvent | None = None
+    try:
+        async with gpu.lease_training(coord, run_id) as lease:
+            if gated:
+                where = f" on {lease.node}" if lease.node else ""
+                yield RunEvent(
+                    run_id=run_id, type="log", message=f"[argus-forge] GPU lease granted via {lease.via}{where}"
+                )
+            oom = False
+            async with contextlib.aclosing(_run_process(command, cwd, {**os.environ, **req.env}, run_id)) as events:
+                async for ev in events:
+                    if ev.type == "log":
+                        oom = oom or any(m in (ev.message or "") for m in _OOM_MARKERS)
+                        yield ev
+                    else:
+                        terminal = ev
+            if terminal is not None and (terminal.type == "error" or terminal.returncode != 0):
+                why = "out of memory" if oom else (terminal.message or f"exit {terminal.returncode}")
+                raise _RunFailed(why)
+    except gpu.LeaseNotGranted as exc:
+        terminal = RunEvent(run_id=run_id, type="error", message=f"GPU lease not granted: {exc}")
+    except _RunFailed:
+        pass
+    if terminal is not None:
+        yield terminal
+
+
+async def _run_process(command: list[str], cwd: str, env: dict[str, str], run_id: str) -> AsyncIterator[RunEvent]:
+    """Run *command* and yield one ``log`` per output line, then ``exit`` (or ``error`` if it could not launch)."""
     logger.info("run_start", run_id=run_id, command=command, cwd=cwd)
     try:
         proc = await asyncio.create_subprocess_exec(

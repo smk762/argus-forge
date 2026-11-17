@@ -98,6 +98,29 @@ docker run --rm --init --gpus all --shm-size=8g \
   visible to argus-proof's `GET /models`, no file shuffling.
 - The `-train` tag is smoke-tested in CI, **not** e2e-trained — see [CI / Release](#ci--release).
 
+### Sharing the GPU (argus-iris)
+
+Every run, from `POST /run` or `argus-forge run`, holds one GPU lease for the whole of `train.sh`, through
+argus-cortex's coordinator. The variables are the suite's own, so they mean the same in every argus service:
+
+| Variable | Meaning |
+| -------- | ------- |
+| `ARGUS_GPU_COORDINATOR` | `none` (default): start at once. `lease`: the host-wide lock file, once the card has room. `broker`: ask [argus-iris](https://github.com/smk762/argus-iris). |
+| `ARGUS_GPU_BROKER_URL` | iris, e.g. `http://morpheus:8120` |
+| `ARGUS_GPU_BROKER_TOKEN` | the shared caller token. Secret: host `.env` only |
+| `ARGUS_GPU_TENANT_MANIFEST` | the committed [`gpu-tenant.yaml`](gpu-tenant.yaml) (the image ships it at `/app/gpu-tenant.yaml`), or `ARGUS_GPU_TENANT=argus-forge` |
+| `ARGUS_GPU_BROKER_FALLBACK` | `lease` (default) or `none`, used when iris is unreachable or has no lease routes yet |
+| `ARGUS_GPU_LEASE_TIMEOUT_S` | how long a run waits for its lease (default 300 s) before it ends in an `error` event |
+| `FORGE_GPU_VRAM_MB` | the lease's footprint (default 22000 MiB) |
+
+The lease is exclusive: kind `train`, `background` priority, not preemptible, pinned to morpheus, and sized to
+fill a 24 GiB card, so iris admits nothing else beside it. When a run may start is the operator's decision, made
+with a schedule window for `argus-forge` in iris's policy file. While it waits, the stream shows
+`[argus-forge] waiting for a GPU lease`. The lease is released, with the run's outcome (`ok`, `failed`, `oom`
+or `cancelled`) and its peak VRAM, before the terminal `exit` event is sent, so an argus-proof eval that
+starts on `exit` finds the GPU free. Peak VRAM needs NVML, from the `gpu` extra that both images include
+(`pip install argus-forge[gpu]` otherwise).
+
 ## CLI
 
 ```bash
@@ -179,6 +202,9 @@ argus-forge serve --cors-any --cors-origin https://demo.example --no-run --expor
 > preflight**, so any page your browser visits can drive an unauthenticated LAN server; the same-origin
 > policy only stops it from *reading* the reply. So unsafe methods are additionally gated on `Origin`:
 > absent (curl, the CLI, server-to-server) or same host:port or allow-listed → through; anything else → 403.
+> A same host:port `Origin` passes only when the host is an IP literal or `localhost`, or is listed in
+> `FORGE_TRUSTED_HOSTS` (comma-separated names, no port). That guards against DNS rebinding, so when you
+> use `/docs` through a name like `http://morpheus:8103`, list `morpheus` there.
 
 | Route | Purpose |
 | ----- | ------- |

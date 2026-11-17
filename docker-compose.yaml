@@ -41,10 +41,31 @@ services:
       # mode. The train image bakes SD_SCRIPTS_DIR=/opt/sd-scripts already; for
       # the thin image, mount a checkout and uncomment.
       # SD_SCRIPTS_DIR: /opt/sd-scripts
+      # Host names (no port) forge is reached by, e.g. morpheus. A page served
+      # from forge's own host:port (/docs) may write only when that host is an
+      # IP, localhost, or listed here (argus-cortex's DNS-rebinding guard).
+      FORGE_TRUSTED_HOSTS: ${FORGE_TRUSTED_HOSTS:-}
+      # The GPU lease every run takes (see .env.example). `none` (the default)
+      # starts a run at once; `broker` asks argus-iris, and `lease` (the local
+      # flock below) is what it falls back to when iris is down. Read only
+      # when a run starts; rendering configs never takes a lease.
+      ARGUS_GPU_COORDINATOR: ${ARGUS_GPU_COORDINATOR:-none}
+      ARGUS_GPU_LEASE_PATH: /run/argus-gpu/argus-gpu.lock
+      ARGUS_GPU_LEASE_TIMEOUT_S: ${ARGUS_GPU_LEASE_TIMEOUT_S:-}
+      ARGUS_GPU_BROKER_URL: ${ARGUS_GPU_BROKER_URL:-}
+      ARGUS_GPU_BROKER_TOKEN: ${ARGUS_GPU_BROKER_TOKEN:-}
+      ARGUS_GPU_BROKER_FALLBACK: ${ARGUS_GPU_BROKER_FALLBACK:-lease}
+      ARGUS_GPU_TENANT_MANIFEST: ${ARGUS_GPU_TENANT_MANIFEST:-/app/gpu-tenant.yaml}
+      ARGUS_GPU_TENANT: ${ARGUS_GPU_TENANT:-}
+      FORGE_GPU_VRAM_MB: ${FORGE_GPU_VRAM_MB:-}
     volumes:
       # The curator export dir forge reads, and writes <export>/forge/ into.
       # Must be the same data the UI names in its request paths.
       - ${FORGE_OUTPUT_PATH:-./out}:/data/out
+      # The host-wide GPU lock, shared with every argus GPU service on this host
+      # (argus-lens and argus-curator mount the same default) for the `lease`
+      # coordinator and the broker's `lease` fallback.
+      - ${ARGUS_GPU_LOCK_DIR:-/tmp/argus-gpu}:/run/argus-gpu
       # Train target: keep the multi-GB Hugging Face base-checkpoint download
       # across container recreations — uncomment this and the `volumes:` block
       # at the bottom (mirrors the README's `-v hf-cache:...` for docker run).

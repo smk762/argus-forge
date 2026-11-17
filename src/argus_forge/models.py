@@ -70,6 +70,10 @@ LEGACY_ROOT_ENV = "FORGE_EXPORT_PATH"
 READONLY_ENV = "ARGUS_FORGE_READONLY"
 # Comma-separated browser origins allowed to call the API.
 CORS_ORIGINS_ENV = "FORGE_CORS_ORIGINS"
+# Comma-separated host names (no port) this server is reached by. A page served
+# from the server's own host:port (e.g. /docs) may write only when that host is
+# an IP literal, localhost, or listed here: argus-cortex's DNS-rebinding guard.
+TRUSTED_HOSTS_ENV = "FORGE_TRUSTED_HOSTS"
 
 # Every env var the server reads. Tests clear these so a value exported in a
 # developer's shell cannot decide whether the security tests pass.
@@ -79,6 +83,7 @@ SERVER_ENV_VARS: tuple[str, ...] = (
     LEGACY_ROOT_ENV,
     READONLY_ENV,
     CORS_ORIGINS_ENV,
+    TRUSTED_HOSTS_ENV,
 )
 
 

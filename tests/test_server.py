@@ -794,3 +794,23 @@ def test_caption_source_root_is_not_a_request_field() -> None:
     assert "caption_source_root" not in ForgeRequest.model_fields
     req = ForgeRequest(export_dir="/x", trainer="kohya", caption_source_root="/")
     assert not hasattr(req, "caption_source_root")
+
+
+@pytest.mark.parametrize("via", ["arg", "env"])
+def test_same_host_write_by_dns_name_needs_a_trusted_host(
+    tmp_path: Path, export_factory: ExportFactory, monkeypatch: pytest.MonkeyPatch, via: str
+) -> None:
+    """cortex refuses a same-host write by bare DNS name (rebinding) unless the host is trusted:
+    /docs reached as http://morpheus:8103 can only drive POST /config with FORGE_TRUSTED_HOSTS=morpheus."""
+    export = export_factory(n=5)
+    req = {"json": {"export_dir": str(export), "trainer": "kohya", "dry_run": True}}
+    headers = {"Origin": "http://morpheus:8103", "Host": "morpheus:8103"}
+    with TestClient(create_app(export_root=str(tmp_path))) as c:
+        assert c.post("/config", headers=headers, **req).status_code == 403
+    if via == "env":
+        monkeypatch.setenv("FORGE_TRUSTED_HOSTS", " morpheus ,")
+        app = create_app(export_root=str(tmp_path))
+    else:
+        app = create_app(export_root=str(tmp_path), trusted_hosts=["morpheus"])
+    with TestClient(app) as c:
+        assert c.post("/config", headers=headers, **req).status_code == 200

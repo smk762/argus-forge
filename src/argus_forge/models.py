@@ -351,12 +351,7 @@ WIRE_MODELS: tuple[type[BaseModel], ...] = (
 
 
 def wire_schema() -> dict:
-    """Combined JSON Schema for forge's wire contract (all WIRE_MODELS)."""
-    from pydantic.json_schema import models_json_schema
+    """Combined JSON Schema for forge's wire contract (all WIRE_MODELS), via argus-cortex's suite-wide builder."""
+    from argus_cortex.wire import wire_schema as build
 
-    _, schema = models_json_schema(
-        [(m, "serialization") for m in WIRE_MODELS],
-        title="argus-forge wire contract",
-        ref_template="#/$defs/{model}",
-    )
-    return schema
+    return build(WIRE_MODELS, title="argus-forge wire contract")

@@ -262,6 +262,17 @@ class ForgeResult(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+# The only keys a run's caller-supplied ``env`` may set: where the trainer
+# checkout lives (each emitted train.sh reads exactly one of the first two) and
+# which GPU / model cache it uses. Anything else, loader and interpreter hooks
+# above all (``LD_*``, ``BASH_ENV``, ``ENV``, ``PATH``, ``PYTHON*``), could
+# change what code runs, so ``runner.prepare_run`` refuses it. A CLI user who
+# needs more sets it in their own shell, which the run inherits.
+RUN_ENV_KEYS: frozenset[str] = frozenset(
+    {"SD_SCRIPTS_DIR", "DIFFUSERS_SCRIPT", "CUDA_VISIBLE_DEVICES", "HF_HOME", "HF_HUB_OFFLINE"}
+)
+
+
 class RunRequest(BaseModel):
     """POST /run — execute a forged trainer config by shelling out to its train.sh."""
 
@@ -270,6 +281,7 @@ class RunRequest(BaseModel):
     # Extra environment for the trainer process — typically where its checkout
     # lives, e.g. {"SD_SCRIPTS_DIR": "/home/you/kohya-ss/sd-scripts"} for kohya
     # or {"DIFFUSERS_SCRIPT": "/home/you/.../train_...py"} for diffusers.
+    # Keys outside RUN_ENV_KEYS are refused.
     env: dict[str, str] = Field(default_factory=dict)
     # Resolve and report the command without executing it.
     dry_run: bool = False

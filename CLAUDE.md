@@ -36,7 +36,7 @@ import or API) belongs in argus-ci's `suite-rules/` catalogue rather than a test
 | Read-only mode: run anything, validate a `/run` body before refusing it, write from `/config`, or turn off on an unparseable flag | `test_server::test_readonly_refuses_run_before_validating`, `::test_readonly_config_is_forced_to_dry_run`, `::test_unrecognised_readonly_value_fails_safe_not_fatal` |
 | Add a write route that read-only mode doesn't cover (it must sit under `/run`, or be listed with why it writes nothing) | `test_rules::test_every_write_route_is_refused_or_known_safe_under_readonly` |
 | Accept a cross-site write, including under `--cors-any` | `test_server::test_cross_site_write_is_refused`, `::test_wildcard_still_refuses_cross_site_writes` |
-| Let a caller's env redirect what `/run` executes (`BASH_ENV`, `ENV`, `LD_PRELOAD`, `LD_AUDIT`, `PATH`) | `test_runner::test_prepare_run_rejects_exec_hijacking_env` |
+| Let a caller's env set anything outside `models.RUN_ENV_KEYS` (a loader, shell or interpreter hook changes what `/run` executes), or hand the trainer the suite's tokens | `test_runner::test_prepare_run_rejects_exec_hijacking_env`, `::test_trainer_does_not_inherit_suite_secrets`, `test_server::test_run_blocked_env_is_400` |
 | Leave a trainer running after its run is cancelled | `test_runner::test_cancelled_run_kills_the_process`, `test_jobs::test_double_cancel_does_not_orphan_the_trainer` |
 | Start a trainer without its GPU lease, or after the lease was refused or timed out | `test_gpu::test_run_takes_an_exclusive_background_lease`, `::test_lease_not_granted_is_an_error_and_nothing_runs` |
 | Send a run's terminal event while still holding its GPU lease | `test_gpu::test_lease_is_released_before_the_terminal_event` |

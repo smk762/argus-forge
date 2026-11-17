@@ -38,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A run's `env` is an allowlist now (`SD_SCRIPTS_DIR`, `DIFFUSERS_SCRIPT`, `CUDA_VISIBLE_DEVICES`, `HF_HOME`,
+  `HF_HUB_OFFLINE`). The old blocklist missed `LD_LIBRARY_PATH`, `PYTHONPATH`, `PYTHONSTARTUP` and other hooks that
+  change what code runs. Any other key is refused with 400. The trainer no longer inherits `ARGUS_GPU_BROKER_TOKEN`,
+  `ARGUS_ADMIN_TOKEN` or `AI_AUDIT_API_TOKEN` from the server's environment.
 - `dataset_size_status` matches argus-studio again: a count inside the good range but outside the ideal band is
   "workable …; the sweet spot is ~X", not "in the sweet spot". Studio had changed its wording, so the /forge page
   (forge's `size_hint`) and the /curate export panel showed different hints for the same set.

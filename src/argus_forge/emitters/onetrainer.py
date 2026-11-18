@@ -18,6 +18,27 @@ _MODEL_TYPES = {
     "sdxl": "STABLE_DIFFUSION_XL_10_BASE",
 }
 
+# Forge's (kohya/accelerate) precision names -> OneTrainer's DataType.
+_DTYPES = {
+    "bf16": "BFLOAT_16",
+    "fp16": "FLOAT_16",
+    "fp32": "FLOAT_32",
+    "no": "FLOAT_32",
+}
+_DEFAULT_DTYPE = "BFLOAT_16"
+
+# Forge's (kohya/diffusers) scheduler names -> OneTrainer's LearningRateScheduler.
+# Only names with a same-meaning member; anything else is flagged, not upper-cased
+# into an enum value OneTrainer does not define.
+_SCHEDULERS = {
+    "constant": "CONSTANT",
+    "linear": "LINEAR",
+    "cosine": "COSINE",
+    "cosine_with_restarts": "COSINE_WITH_RESTARTS",
+    "adafactor": "ADAFACTOR",
+}
+_DEFAULT_SCHEDULER = "COSINE"
+
 
 def emit(ctx: EmitContext) -> list[GeneratedFile]:
     p = ctx.params
@@ -27,6 +48,19 @@ def emit(ctx: EmitContext) -> list[GeneratedFile]:
         model_type = _MODEL_TYPES["sdxl"]
         ctx.warnings.append(
             f"onetrainer: no model_type mapping for backend {backend!r} — wrote {model_type}; adjust in the UI"
+        )
+
+    train_dtype = _DTYPES.get(p.precision.lower())
+    if train_dtype is None:
+        train_dtype = _DEFAULT_DTYPE
+        ctx.warnings.append(
+            f"onetrainer: no train_dtype mapping for precision {p.precision!r} — wrote {train_dtype}; adjust in the UI"
+        )
+    scheduler = _SCHEDULERS.get(p.scheduler.lower())
+    if scheduler is None:
+        scheduler = _DEFAULT_SCHEDULER
+        ctx.warnings.append(
+            f"onetrainer: no learning_rate_scheduler mapping for {p.scheduler!r} — wrote {scheduler}; adjust in the UI"
         )
 
     concepts = [
@@ -62,9 +96,9 @@ def emit(ctx: EmitContext) -> list[GeneratedFile]:
         "epochs": p.epochs,
         "batch_size": p.batch_size,
         "learning_rate": p.unet_lr,
-        "learning_rate_scheduler": p.scheduler.upper(),
+        "learning_rate_scheduler": scheduler,
         "resolution": str(p.resolution),
-        "train_dtype": "BFLOAT_16" if p.precision == "bf16" else "FLOAT_16",
+        "train_dtype": train_dtype,
         "lora_rank": p.network_dim,
         "lora_alpha": float(p.network_alpha),
         "output_model_format": "SAFETENSORS",

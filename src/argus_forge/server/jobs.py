@@ -277,12 +277,13 @@ class Job:
             # Wait for the in-flight cancel instead of returning straight away:
             # shutdown() must not report every trainer reaped while another
             # caller is still inside runner._terminate's SIGTERM->SIGKILL grace.
-            # The finally below guarantees _done is set, so this cannot wedge.
+            # The finally below guarantees _done is set once the task has ended
+            # (at once, or from the task's done callback), so this cannot wedge.
             await self._done.wait()
             return
         self._cancelling = True
+        task = self._task
         try:
-            task = self._task
             if task is not None and not task.done():
                 task.cancel()
                 try:
@@ -299,9 +300,17 @@ class Job:
         finally:
             # If the task was cancelled before its first step, _drive's body — and
             # so its finalize — never ran; make sure the job doesn't stay
-            # "running". In a finally so a propagating cancel still releases
-            # anyone parked on _done above.
-            self._finalize("cancelled")
+            # "running". But only once the task has really ended: if *this*
+            # coroutine was cancelled while the task is still unwinding inside
+            # runner._terminate's grace, finalizing now would release everyone
+            # parked on _done (shutdown included) while the trainer is still
+            # alive, and let _drive publish its `cancelled` after _done. Defer to
+            # the task's own end instead; _finalize is idempotent, so whichever of
+            # _drive's handler and this callback runs first wins.
+            if task is None or task.done():
+                self._finalize("cancelled")
+            else:
+                task.add_done_callback(lambda _t: self._finalize("cancelled"))
 
 
 class JobRegistry:
@@ -333,7 +342,13 @@ class JobRegistry:
         without an owner in this process. Cancels concurrently so total time is
         one SIGTERM grace period, not one per run (which would overrun the
         container's stop grace and leave the later runs un-reaped)."""
-        await asyncio.gather(*(job.cancel() for job in list(self._jobs.values())))
+        jobs = [job for job in self._jobs.values() if not job.finished]
+        # return_exceptions: one failing cancel must not abandon the others
+        # mid-flight (gather would raise at once while they are still reaping).
+        results = await asyncio.gather(*(job.cancel() for job in jobs), return_exceptions=True)
+        for job, result in zip(jobs, results, strict=True):
+            if isinstance(result, BaseException):
+                logger.error("job_cancel_failed", run_id=job.run_id, error=repr(result))
 
     def _evict(self) -> None:
         finished = sorted((j for j in self._jobs.values() if j.finished), key=lambda j: j.ended_at or "")

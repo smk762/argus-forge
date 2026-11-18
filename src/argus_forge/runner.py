@@ -97,7 +97,8 @@ async def _iter_output_lines(stream: asyncio.StreamReader) -> AsyncIterator[str]
     Chunked (not readline) so no line-length limit applies and ``\\r`` progress
     bars stream incrementally; CR/LF are single ASCII bytes that never appear
     inside a UTF-8 multibyte sequence, so splitting on them at the byte level is
-    safe. Empty segments (a bare ``\\r\\n`` boundary, trailing separators) are
+    safe. A forced cut (see ``_MAX_SEGMENT``) is moved back to a character
+    boundary so it cannot split a multibyte sequence. Empty segments (a bare ``\\r\\n`` boundary, trailing separators) are
     skipped. The whole stream is always drained to EOF — the reader never stops
     early, so the child can't wedge on a full pipe.
     """
@@ -111,8 +112,9 @@ async def _iter_output_lines(stream: asyncio.StreamReader) -> AsyncIterator[str]
             idx = _first_separator(buf)
             if idx < 0:
                 if len(buf) >= _MAX_SEGMENT:  # bound memory on separator-less output
-                    yield bytes(buf[:_MAX_SEGMENT]).decode("utf-8", "replace")
-                    del buf[:_MAX_SEGMENT]
+                    cut = _char_boundary(buf, _MAX_SEGMENT)
+                    yield bytes(buf[:cut]).decode("utf-8", "replace")
+                    del buf[:cut]
                     continue
                 break
             if idx > 0:  # skip empties from adjacent separators
@@ -120,6 +122,22 @@ async def _iter_output_lines(stream: asyncio.StreamReader) -> AsyncIterator[str]
             del buf[: idx + 1]
     if buf:
         yield bytes(buf).decode("utf-8", "replace")
+
+
+def _char_boundary(buf: bytearray, cut: int) -> int:
+    """*cut* moved back (at most 3 bytes) so it doesn't land inside a UTF-8 sequence.
+
+    A byte of the form ``10xxxxxx`` continues the previous character; cutting
+    before one would decode both halves as U+FFFD. Invalid UTF-8 (a longer run
+    of continuation bytes) is cut at *cut* as before.
+    """
+    for back in range(4):
+        i = cut - back
+        if i <= 0:
+            break
+        if i >= len(buf) or (buf[i] & 0xC0) != 0x80:
+            return i
+    return cut
 
 
 def _first_separator(buf: bytearray) -> int:
@@ -133,26 +151,49 @@ def _first_separator(buf: bytearray) -> int:
     return min(cr, lf)
 
 
+# How long a run's process group gets after SIGTERM before SIGKILL.
+_TERM_GRACE_S = 5.0
+_GROUP_POLL_S = 0.05
+
+
 async def _terminate(proc: asyncio.subprocess.Process) -> None:
     """Stop the child's process group so a cancelled/failed run leaves nothing
     orphaned (``accelerate`` is a grandchild of ``bash``; the child is a group
-    leader via ``start_new_session``). SIGTERM is sent synchronously so it fires
-    even while the surrounding task is being cancelled; SIGKILL escalates if it
-    lingers."""
-    if proc.returncode is not None:
-        return
-    _signal_group(proc, signal.SIGTERM)
-    with contextlib.suppress(Exception):
-        await asyncio.wait_for(asyncio.shield(proc.wait()), timeout=5)
-    if proc.returncode is None:
-        _signal_group(proc, signal.SIGKILL)
+    leader via ``start_new_session``, so its pgid is its pid — recorded at spawn,
+    not looked up from the leader, which may already be reaped).
+
+    Escalation is decided by the *group*, not the leader: bash typically exits on
+    SIGTERM at once while its trainer workers linger, and a leader that already
+    exited can leave workers behind. SIGTERM is sent synchronously so it fires
+    even while the surrounding task is being cancelled; SIGKILL follows in a
+    ``finally`` if anything in the group outlives the grace, so a second
+    cancellation arriving during the grace cannot skip it."""
+    pgid = proc.pid
+    if not _signal_group(pgid, signal.SIGTERM):
+        return  # nothing left in the group
+    try:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _TERM_GRACE_S
+        while _signal_group(pgid, 0) and loop.time() < deadline:
+            if proc.returncode is None:
+                # Wake on the leader's exit, but keep polling the group after it.
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(proc.wait()), timeout=_GROUP_POLL_S)
+            else:
+                await asyncio.sleep(_GROUP_POLL_S)
+    finally:
+        _signal_group(pgid, signal.SIGKILL)
 
 
-def _signal_group(proc: asyncio.subprocess.Process, sig: int) -> None:
-    if proc.returncode is not None:
-        return
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(os.getpgid(proc.pid), sig)
+def _signal_group(pgid: int, sig: int) -> bool:
+    """Send *sig* to process group *pgid*; False if the group no longer exists."""
+    try:
+        os.killpg(pgid, sig)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 class _RunFailed(Exception):

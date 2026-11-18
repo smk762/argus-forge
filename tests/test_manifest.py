@@ -127,7 +127,23 @@ def test_manifest_2x_empty_exported_path_rejected(tmp_path: Path) -> None:
         inspect_export(export)
 
 
-@pytest.mark.parametrize("bad", ["/abs/IMG.png", "../sibling/IMG.png", "sub/../../IMG.png"])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "/abs/IMG.png",
+        "../sibling/IMG.png",
+        "sub/../../IMG.png",
+        # Names the export root itself, not a file in it.
+        ".",
+        "./",
+        # Windows forms a native join would treat as traversal or another drive.
+        "..\\..\\evil.png",
+        "sub\\IMG.png",
+        "C:/Windows/x.png",
+        "C:evil.png",
+        "//server/share/x.png",
+    ],
+)
 def test_manifest_2x_exported_path_escape_rejected(tmp_path: Path, bad: str) -> None:
     """An absolute or ``..`` exported_path escapes the export root; it is rejected
     at read time so a caption is never written outside the export dir."""

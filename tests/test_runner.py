@@ -162,3 +162,92 @@ async def test_trainer_does_not_inherit_suite_secrets(tmp_path: Path, monkeypatc
 def test_runnable_trainers_from_entrypoint() -> None:
     """Runnability comes from the machine entrypoint field, not the display list."""
     assert set(RUNNABLE_TRAINERS) == {"kohya", "diffusers"}
+
+
+_IGNORE_TERM = "python3 -c 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'"
+
+
+def _pgrep(mark: str) -> str:
+    return subprocess.run(["pgrep", "-f", mark], capture_output=True, text=True).stdout.strip()
+
+
+async def _gone(mark: str, within: float = 3.0) -> bool:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + within
+    while _pgrep(mark):
+        if loop.time() > deadline:
+            subprocess.run(["pkill", "-9", "-f", mark])  # cleanup only on failure
+            return False
+        await asyncio.sleep(0.1)
+    return True
+
+
+@pytest.mark.skipif(not shutil.which("pgrep"), reason="pgrep not available")
+async def test_cancel_kills_a_grandchild_that_outlives_the_leader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """bash exits on SIGTERM at once, but its trainer worker ignores it: escalation
+    must follow the group, not the leader, or the worker is orphaned on the GPU."""
+    monkeypatch.setattr("argus_forge.runner._TERM_GRACE_S", 0.5, raising=False)
+    mark = "argusforge_test_grandchild_outlives_leader"
+    export = forge_stub(tmp_path, "kohya", f"echo up\n{_IGNORE_TERM} {mark}\n")
+
+    async def consume() -> None:
+        async for _ in astream_run(RunRequest(export_dir=str(export), trainer="kohya")):
+            pass
+
+    task = asyncio.ensure_future(consume())
+    await asyncio.sleep(0.8)
+    assert _pgrep(mark)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert await _gone(mark), "the worker survived: SIGKILL was decided by the (already-exited) leader"
+
+
+@pytest.mark.skipif(not shutil.which("pgrep"), reason="pgrep not available")
+async def test_a_finished_leader_does_not_leave_its_group_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A leader that already exited when the run ends still has its group signalled."""
+    monkeypatch.setattr("argus_forge.runner._TERM_GRACE_S", 0.5, raising=False)
+    mark = "argusforge_test_leader_gone_first"
+    # Detach the worker's stdout so the stream reaches EOF when bash exits.
+    export = forge_stub(tmp_path, "kohya", f"{_IGNORE_TERM} {mark} >/dev/null 2>&1 &\nsleep 0.5\nexit 0\n")
+    events = await asyncio.wait_for(_collect(RunRequest(export_dir=str(export), trainer="kohya")), timeout=20)
+    assert events[-1].type == "exit" and events[-1].returncode == 0
+    assert await _gone(mark), "the worker was orphaned because the leader had already exited"
+
+
+async def test_a_second_cancellation_during_the_grace_still_sigkills() -> None:
+    """Cancelling _terminate mid-grace (shutdown, a repeated cancel) must not skip SIGKILL."""
+    from argus_forge.runner import _terminate
+
+    proc = await asyncio.create_subprocess_exec(
+        "bash", "-c", "trap '' TERM; while :; do sleep 0.1; done", start_new_session=True
+    )
+    await asyncio.sleep(0.2)
+    term = asyncio.ensure_future(_terminate(proc))
+    await asyncio.sleep(0.3)  # inside the SIGTERM grace
+    term.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await term
+    try:
+        assert await asyncio.wait_for(proc.wait(), timeout=3) == -9
+    finally:
+        if proc.returncode is None:  # pragma: no cover - cleanup only on failure
+            proc.kill()
+
+
+async def test_forced_cut_never_splits_a_multibyte_character(monkeypatch: pytest.MonkeyPatch) -> None:
+    from argus_forge import runner
+
+    monkeypatch.setattr(runner, "_MAX_SEGMENT", 10)
+    text = "aé€😀b" * 20  # 1-, 2-, 3- and 4-byte characters (11 bytes: cuts drift), no separators
+    stream = asyncio.StreamReader()
+    stream.feed_data(text.encode())
+    stream.feed_eof()
+    segments = [seg async for seg in runner._iter_output_lines(stream)]
+    assert len(segments) > 1
+    assert "�" not in "".join(segments)
+    assert "".join(segments) == text

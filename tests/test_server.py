@@ -295,12 +295,13 @@ def test_readonly_refuses_run(readonly_client: TestClient, tmp_path: Path) -> No
         pytest.param({"export_dir": "x", "trainer": "bogus"}, id="unknown-trainer"),
     ],
 )
-def test_readonly_refuses_run_before_validating(readonly_client: TestClient, body: dict) -> None:
+def test_readonly_refuses_run_before_validating(readonly_client: TestClient, client: TestClient, body: dict) -> None:
     """A schema-invalid request gets the same 403, not a 422 implying it could work.
 
     The guard is middleware precisely so it lands ahead of FastAPI's body
     validation; an in-handler check cannot, since the 422 is raised first.
     """
+    assert client.post("/run", json=body).status_code == 422  # the body really is schema-invalid
     assert readonly_client.post("/run", json=body).status_code == 403
 
 
@@ -328,12 +329,22 @@ def test_readonly_config_is_forced_to_dry_run(readonly_client: TestClient, expor
     Without this, an anonymous curl overwrites the curator's metadata.jsonl and
     plants an executable train.sh on the shared volume.
     """
-    export = export_factory(n=10)
-    resp = readonly_client.post("/config", json={"export_dir": str(export), "trainer": "kohya"})
-    assert resp.status_code == 200
-    assert resp.json()["files"]  # still rendered...
-    assert not (export / "forge").exists()  # ...but nothing on disk
-    assert all(f["path"] is None for f in resp.json()["files"])
+    export = export_factory(n=10, source_captions=3)  # collectable sidecars: also a write
+    (export / "metadata.jsonl").write_text('{"curator": "original"}\n', encoding="utf-8")
+
+    def snapshot() -> dict[str, bytes]:
+        return {str(p.relative_to(export)): p.read_bytes() for p in sorted(export.rglob("*")) if p.is_file()}
+
+    before = snapshot()
+    # diffusers is the trainer that writes metadata.jsonl at the dataset root.
+    for trainer in ("kohya", "diffusers"):
+        resp = readonly_client.post("/config", json={"export_dir": str(export), "trainer": trainer})
+        assert resp.status_code == 200
+        assert resp.json()["files"]  # still rendered...
+        assert all(f["path"] is None for f in resp.json()["files"])
+    assert snapshot() == before  # ...but nothing on disk changed: no metadata.jsonl overwrite, no sidecars
+    assert not (export / "forge").exists()
+    assert not list(export.rglob("train.sh"))
 
 
 def test_readonly_mode_comes_from_the_env(tmp_path: Path) -> None:
@@ -519,6 +530,32 @@ def test_caption_sources_outside_the_root_are_refused(client: TestClient, tmp_pa
     assert not (export / "a.txt").exists()
     assert "hunter2" not in json.dumps(body)
     assert any("outside the export root" in w for w in body["warnings"])
+
+
+def test_caption_source_refusal_does_not_reveal_whether_the_file_exists(client: TestClient, tmp_path: Path) -> None:
+    """The fence runs before any probe of the untrusted path: an outside source is
+    refused the same way whether or not its sidecar exists, so the refused count is
+    not an existence oracle for files outside the root."""
+    outside = tmp_path.parent / f"{tmp_path.name}-probe"
+    outside.mkdir(exist_ok=True)
+    (outside / "present.txt").write_text("x", encoding="utf-8")
+
+    warnings = {}
+    for name in ("present", "absent"):
+        export = tmp_path / f"set-{name}"
+        export.mkdir()
+        (export / "a.png").write_bytes(b"x")
+        row = {
+            "manifest_version": "2.0",
+            "rel_path": "a.png",
+            "abs_path": str(outside / f"{name}.png"),
+            "exported_path": "a.png",
+        }
+        (export / "manifest.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+        body = client.post("/config", json={"export_dir": f"set-{name}", "trainer": "kohya", "dry_run": True}).json()
+        warnings[name] = [w for w in body["warnings"] if "outside the export root" in w]
+    assert warnings["present"]
+    assert warnings["present"] == warnings["absent"]
 
 
 def test_no_export_root_refuses_everything() -> None:

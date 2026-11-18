@@ -30,7 +30,18 @@ app = typer.Typer(
 def _cli(verbose: bool = Option(False, "--verbose", "-v", help="Show info/debug logs")) -> None:
     """Keep stdout clean for --json output; ``serve`` re-enables info logs."""
     level = logging.DEBUG if verbose else logging.WARNING
-    structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(level))
+    _configure_logging(level)
+
+
+def _configure_logging(level: int) -> None:
+    """Logs go to stderr at *level*: stdout carries only the command's output, so a
+    warning (or a --verbose info line) can never corrupt a --json document."""
+    structlog.configure(
+        wrapper_class=structlog.make_filtering_bound_logger(level),
+        # Resolve sys.stderr per logger, not once: a captured stream (a test runner's)
+        # can be closed by the time a later log line is written.
+        logger_factory=lambda *_: structlog.PrintLogger(sys.stderr),
+    )
 
 
 @app.command()
@@ -72,20 +83,21 @@ def config(
     from argus_forge.emitters.base import map_path
     from argus_forge.models import ForgeError, ForgeRequest, ParamOverrides
 
-    overrides = ParamOverrides(
-        repeats=repeats,
-        epochs=epochs,
-        network_dim=network_dim,
-        network_alpha=network_alpha,
-        unet_lr=unet_lr,
-        text_encoder_lr=text_encoder_lr,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        resolution=resolution,
-        batch_size=batch_size,
-        precision=precision,
-    )
     try:
+        # Inside the try: an out-of-range override (--repeats 0) is a clean error, not a traceback.
+        overrides = ParamOverrides(
+            repeats=repeats,
+            epochs=epochs,
+            network_dim=network_dim,
+            network_alpha=network_alpha,
+            unet_lr=unet_lr,
+            text_encoder_lr=text_encoder_lr,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            resolution=resolution,
+            batch_size=batch_size,
+            precision=precision,
+        )
         req = ForgeRequest(
             export_dir=str(export_dir),
             trainer=trainer,  # type: ignore[arg-type]  (pydantic validates the literal)
@@ -192,6 +204,12 @@ def run(
         returncode: int | None = None
         error_seen = False
         async for ev in astream_run(req):
+            # Record the outcome before choosing an output format: --json must exit
+            # with the same status as the human-readable run.
+            if ev.type == "exit":
+                returncode = ev.returncode
+            elif ev.type == "error":
+                error_seen = True
             if as_json:
                 typer.echo(ev.model_dump_json())
                 continue
@@ -202,10 +220,8 @@ def run(
             elif ev.type == "log":
                 typer.echo(ev.message or "")
             elif ev.type == "exit":
-                returncode = ev.returncode
                 typer.echo(f"{'✔' if returncode == 0 else '✗'} run {ev.run_id} finished (exit {returncode})")
             elif ev.type == "error":
-                error_seen = True
                 typer.echo(f"Error: {ev.message}", err=True)
         return _run_exit_status(returncode, error_seen)
 
@@ -329,7 +345,7 @@ def serve(
     from argus_forge.models import ARGUS_ROOT_ENV, CORS_ORIGINS_ENV, LEGACY_ROOT_ENV, ForgeError
     from argus_forge.server import create_app, env_readonly
 
-    structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
+    _configure_logging(logging.INFO)
     try:
         env_path_map()  # fail fast at startup, not as a 400 on every /config
     except ForgeError as exc:

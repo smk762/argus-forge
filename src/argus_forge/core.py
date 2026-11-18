@@ -146,10 +146,12 @@ def collect_captions(
             src_caption = caption_path(Path(row.abs_path))
         except ValueError:
             continue
-        if not src_caption.is_file():
-            continue
+        # Fence before any probe of the untrusted path: checking existence first
+        # would let the refused count reveal whether a file exists outside the root.
         if root is not None and not _within(root, src_caption):
             refused += 1
+            continue
+        if not src_caption.is_file():
             continue
         dest_caption = caption_path(dest_img)
         if dest_caption.exists():
@@ -217,8 +219,8 @@ def forge_config(req: ForgeRequest, *, caption_source_root: str | None = None) -
             warnings.append(f"dry run: {captions_collected} caption sidecars would be collected from sources")
         if captions_refused:
             warnings.append(
-                f"{captions_refused} caption sidecar(s) skipped: the manifest's abs_path points outside "
-                "the export root, and forge will not copy files from outside it into the dataset"
+                f"{captions_refused} caption source(s) skipped: the manifest's abs_path points outside "
+                "the export root, and forge will not read files from outside it into the dataset"
             )
 
     # Collection only adds sidecars next to already-counted images, so refresh
@@ -227,7 +229,8 @@ def forge_config(req: ForgeRequest, *, caption_source_root: str | None = None) -
     if captions_collected and not req.dry_run:
         info = info.model_copy(update={"caption_count": info.caption_count + captions_collected})
 
-    if info.caption_count == 0:
+    # A dry run collects nothing, but the run it previews would: warn on that count.
+    if info.caption_count + (captions_collected if req.dry_run else 0) == 0:
         warnings.append("no .txt captions found — images will train on the trigger phrase alone")
 
     profile = info.target_profile

@@ -13,7 +13,7 @@ literals every suite stage uses, no local copy to drift.
 
 from __future__ import annotations
 
-from pathlib import PurePosixPath
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Literal
 
 # Re-exported: the rest of forge (and consumers) import the taxonomy from here.
@@ -130,7 +130,18 @@ class ManifestRow(BaseModel):
             if not self.exported_path.strip():
                 raise ValueError("exported_path is empty")
             rel = PurePosixPath(self.exported_path)
-            if rel.is_absolute() or ".." in rel.parts:
+            win = PureWindowsPath(self.exported_path)
+            if (
+                rel.is_absolute()
+                or ".." in rel.parts
+                # "." / "./" normalise to no parts: the export root itself, not a file in it.
+                or not rel.parts
+                # The curator writes posix paths; a backslash or drive/UNC prefix is a
+                # Windows path that a native join would treat as traversal or another root.
+                or "\\" in self.exported_path
+                or win.drive
+                or win.is_absolute()
+            ):
                 raise ValueError(f"exported_path {self.exported_path!r} must be a relative path inside the export root")
         elif manifest_major(self.manifest_version) in MAJORS_REQUIRING_EXPORTED_PATH:
             raise ValueError(

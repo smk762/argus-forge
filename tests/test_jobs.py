@@ -313,20 +313,29 @@ async def test_replaying_a_finished_run_registers_nothing_lasting(tmp_path: Path
 
 
 async def test_a_late_viewer_sees_every_event_exactly_once(tmp_path: Path) -> None:
-    """A viewer attached mid-run reads forward from one buffer, so the old
-    backlog/live seam — the place a broadcast fan-out can drop or duplicate an
-    event — cannot desynchronise: no gap, no repeat, no reordering."""
+    """A viewer attached mid-run — after a backlog already exists — reads forward
+    from one buffer, so the old backlog/live seam (the place a broadcast fan-out
+    can drop or duplicate an event) cannot desynchronise: no gap, no repeat, no
+    reordering. An early viewer sees the identical stream."""
     job = _job(tmp_path, "echo hi\n")
-    viewer = await _attach(job)
-    seen: list[str] = []
-    for i in range(50):
+    early = await _attach(job, "early")
+    for i in range(20):  # the backlog the late viewer must replay
+        job._publish(RunEvent(run_id=job.run_id, type="log", message=f"line{i}"))
+
+    late = job.subscribe()
+    late_seen = [(await asyncio.wait_for(late.__anext__(), timeout=2)).message for _ in range(5)]  # attach mid-backlog
+    assert len(job._subscribers) == 2, "the late viewer never registered"
+    for i in range(20, 50):
         job._publish(RunEvent(run_id=job.run_id, type="log", message=f"line{i}"))
         if i % 7 == 0:  # read part-way, so the viewer repeatedly catches up and re-parks
-            seen.append((await viewer.__anext__()).message)
+            late_seen.append((await asyncio.wait_for(late.__anext__(), timeout=2)).message)
     job._finalize("succeeded")
 
-    seen += [ev.message async for ev in viewer]
-    assert seen == [f"line{i}" for i in range(50)]
+    late_seen += [ev.message async for ev in late]
+    early_seen = [ev.message async for ev in early]
+    lines = [f"line{i}" for i in range(50)]
+    assert late_seen == ["early", *lines]  # the window's floor includes early's label
+    assert early_seen == lines
 
 
 async def test_live_viewer_sees_progress_then_ends_at_finalize(tmp_path: Path) -> None:
@@ -369,15 +378,34 @@ async def test_live_viewer_sees_progress_then_ends_at_finalize(tmp_path: Path) -
     assert not job._subscribers  # the viewer unregistered on the way out
 
 
-async def test_registry_evicts_only_finished_and_keeps_newest(tmp_path: Path) -> None:
+async def test_registry_evicts_only_finished_and_keeps_newest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Past the retention bound, the oldest finished runs go first; a running one
+    is never evicted however old it is."""
+    monkeypatch.setattr("argus_forge.server.jobs.MAX_FINISHED_JOBS", 2)
     reg = JobRegistry()
-    export = forge_stub(tmp_path, "kohya", "echo hi\n")
-    req = RunRequest(export_dir=str(export), trainer="kohya")
-    command, cwd = prepare_run(req)
-    job = reg.start(req, command, cwd)
-    await asyncio.wait_for(job._task, timeout=10)
-    assert reg.get(job.run_id) is job
-    assert job in reg.list()
+
+    def start(name: str, body: str) -> Job:
+        export = forge_stub(tmp_path / name, "kohya", body)
+        req = RunRequest(export_dir=str(export), trainer="kohya")
+        command, cwd = prepare_run(req)
+        return reg.start(req, command, cwd)
+
+    running = start("running", "sleep 30\n")  # the oldest job of all
+    finished: list[Job] = []
+    try:
+        for i in range(4):
+            job = start(f"done{i}", "echo hi\n")
+            await asyncio.wait_for(job._task, timeout=10)
+            finished.append(job)
+            await asyncio.sleep(0.01)  # distinct ended_at stamps
+        trigger = start("trigger", "sleep 30\n")  # eviction runs on start
+
+        assert reg.get(running.run_id) is running and not running.finished
+        assert [reg.get(j.run_id) for j in finished[:2]] == [None, None]
+        assert [reg.get(j.run_id) for j in finished[2:]] == finished[2:]
+        assert {j.run_id for j in reg.list()} == {j.run_id for j in (running, trigger, *finished[2:])}
+    finally:
+        await reg.shutdown()
 
 
 def test_state_reports_the_resolved_export_dir() -> None:
@@ -439,3 +467,54 @@ async def test_double_cancel_does_not_orphan_the_trainer(tmp_path: Path) -> None
     if alive:  # pragma: no cover - cleanup only on failure
         subprocess.run(["pkill", "-9", "-f", mark])
     assert not alive, "trainer orphaned: the second cancel skipped the SIGKILL escalation"
+
+
+@pytest.mark.skipif(not shutil.which("pgrep"), reason="pgrep not available")
+async def test_an_interrupted_cancel_does_not_finalize_before_the_reap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first cancel caller being cancelled itself (uvicorn's graceful-shutdown
+    timeout) re-cancels the run mid-grace. The job may only read as finished once
+    its trainer is really gone, with `cancelled` the last event published, so
+    nobody parked on _done (shutdown included) is released while it still runs."""
+    monkeypatch.setattr("argus_forge.runner._TERM_GRACE_S", 2.0, raising=False)
+    mark = "argusforge_test_interrupted_cancel"
+    job = _job(tmp_path, f"trap '' TERM\npython3 -c 'import time; time.sleep(60)' {mark}\n")
+    job._task = asyncio.create_task(job._drive())
+    await asyncio.sleep(0.8)
+    assert subprocess.run(["pgrep", "-f", mark], capture_output=True, text=True).stdout.strip()
+
+    first = asyncio.create_task(job.cancel())
+    waiter = asyncio.create_task(job.cancel())  # re-entrant: parks on _done
+    await asyncio.sleep(0.2)  # inside the grace
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    await asyncio.wait_for(waiter, timeout=10)
+
+    alive = subprocess.run(["pgrep", "-f", mark], capture_output=True, text=True).stdout.strip()
+    if alive:  # pragma: no cover - cleanup only on failure
+        subprocess.run(["pkill", "-9", "-f", mark])
+    assert job.finished and job.status == "cancelled"
+    assert not alive, "job finalized (and its waiters released) while the trainer was still running"
+    assert job._events[-1].type == "cancelled"
+
+
+async def test_one_failing_cancel_does_not_abort_shutdown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """shutdown() must let every cancel run to completion even if one raises."""
+    reg = JobRegistry()
+    jobs = []
+    for name in ("a", "b"):
+        export = forge_stub(tmp_path / name, "kohya", "echo up\nsleep 30\n")
+        req = RunRequest(export_dir=str(export), trainer="kohya")
+        command, cwd = prepare_run(req)
+        jobs.append(reg.start(req, command, cwd))
+    await asyncio.sleep(0.3)
+
+    async def boom() -> None:
+        raise RuntimeError("kill failed")
+
+    monkeypatch.setattr(jobs[0], "cancel", boom)
+    await asyncio.wait_for(reg.shutdown(), timeout=10)  # does not raise
+    assert jobs[1].finished and jobs[1].status == "cancelled"
+    await Job.cancel(jobs[0])  # cleanup: reap the run whose cancel was patched

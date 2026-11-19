@@ -1,0 +1,34 @@
+# argus-iris GPU tenant manifest for argus-forge (#41).
+# Validated by argus-cortex's TenantManifest (gpu-tenant-schema.json,
+# tenant_version 1.0); tests/test_gpu.py fails if it stops validating or drifts
+# from the lease runner.py takes (src/argus_forge/gpu.py).
+#
+# With ARGUS_GPU_COORDINATOR=broker, forge registers this with the broker on the
+# first run's lease (ARGUS_GPU_TENANT_MANIFEST points at it; the Docker image
+# ships it at /app/gpu-tenant.yaml). Tokens never go here: ARGUS_GPU_BROKER_TOKEN
+# lives in the host's .env.
+#
+# When training may start is the operator's call, not this file's: iris's policy
+# file holds the argus-forge schedule window (e.g. Saturday nights on morpheus).
+tenant: argus-forge
+description: LoRA training (kohya_ss sd-scripts) launched by POST /run or `argus-forge run`.
+repo: smk762/argus-forge
+node: morpheus
+
+kinds:
+  # One forged train.sh, start to finish. Exclusive: the footprint fills
+  # morpheus's 24 GiB card less iris's headroom, so nothing else is admitted
+  # beside it. Not preemptible: a training step cannot stop at a safe point, so
+  # the run holds the card until it exits. FORGE_GPU_VRAM_MB overrides the
+  # figure per host; keep this in step if you change the default.
+  - kind: train
+    target: in-process
+    vram_mb: 22000
+    priority: background
+    preemptible: false
+    constraints:
+      node: morpheus
+    description: A whole LoRA training run.
+
+# No residents: forge keeps no model loaded between runs, so there is nothing
+# for iris to unload or evict.

@@ -220,3 +220,37 @@ def test_serve_fails_safe_on_a_typoed_readonly_value(monkeypatch: pytest.MonkeyP
     kwargs = _serve_kwargs(monkeypatch, [])
     assert kwargs["allow_run"] is False
     assert "Demo-safe mode" in kwargs["_stderr"]
+
+
+def test_run_json_exit_code_reflects_the_trainer(tmp_path: Path) -> None:
+    """--json must not swallow the outcome: a failing trainer exits non-zero."""
+    export = forge_stub(tmp_path, "kohya", "exit 5\n")
+    result = runner.invoke(app, ["run", str(export), "--trainer", "kohya", "--json"])
+    assert result.exit_code == 5
+
+
+def test_run_json_signal_death_reports_128_plus_n(tmp_path: Path) -> None:
+    export = forge_stub(tmp_path, "kohya", "kill -TERM $$\n")
+    result = runner.invoke(app, ["run", str(export), "--trainer", "kohya", "--json"])
+    assert result.exit_code == 143
+
+
+def test_logs_never_reach_stdout_in_json_mode(tmp_path: Path) -> None:
+    """Even with --verbose, logs go to stderr: every stdout line is an NDJSON event."""
+    export = forge_stub(tmp_path, "kohya", "echo hi\n")
+    result = runner.invoke(app, ["--verbose", "run", str(export), "--trainer", "kohya", "--json"])
+    assert result.exit_code == 0
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert lines
+    for line in lines:
+        json.loads(line)
+    assert "run_start" in result.stderr
+
+
+@pytest.mark.parametrize("flag", [["--repeats", "0"], ["--epochs", "-1"], ["--unet-lr", "0"]])
+def test_config_bad_override_is_clean_error_not_traceback(export_factory: ExportFactory, flag: list[str]) -> None:
+    export = export_factory(n=3)
+    result = runner.invoke(app, ["config", str(export), "--dry-run", *flag])
+    assert result.exit_code == 1
+    assert "Error:" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)

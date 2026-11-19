@@ -22,17 +22,23 @@ classifiers = [
 dependencies = [
     "pydantic>=2.7",
     "structlog>=24.0",
-    # The suite's shared target taxonomy (argus_cortex.taxonomy). 0.4.7 is the
-    # first with the `concept` category. The bare package pulls only pydantic.
-    "argus-cortex>=0.4.7",
+    # The suite's shared target taxonomy (argus_cortex.taxonomy) and the GPU
+    # lease (argus_cortex.gpu). 0.6 is the first with the argus-iris broker
+    # client. Capped below the next untested minor: cortex is pre-1.0, where a
+    # minor bump may break. The bare package pulls only pydantic.
+    "argus-cortex>=0.6,<0.10",
 ]
 
 [project.optional-dependencies]
 # argus-cortex[server] carries the suite's shared write-guard and env-flag
 # helpers (argus_cortex.server); it pulls starlette, which fastapi provides too.
-server = ["fastapi>=0.110", "uvicorn>=0.27", "python-multipart>=0.0.7", "argus-cortex[server]>=0.4.7"]
+server = ["fastapi>=0.110", "uvicorn>=0.27", "python-multipart>=0.0.7", "argus-cortex[server]>=0.6,<0.10"]
+# The GPU lease a run takes: [remote] is the argus-iris broker client (httpx),
+# [yaml] reads gpu-tenant.yaml, [gpu] is NVML for the peak-VRAM report. Without
+# it ARGUS_GPU_COORDINATOR=broker cannot lease, and no peak is reported.
+gpu = ["argus-cortex[gpu,remote,yaml]>=0.6,<0.10"]
 cli = ["typer>=0.12", "rich>=13.0"]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff==0.15.16", "httpx>=0.27", "httpx2>=2.7", "certifi>=2026.10.19"]
+dev = ["pytest>=8.0", "argus-cortex[remote,yaml]>=0.6,<0.10", "pytest-asyncio>=0.23", "ruff==0.15.16", "httpx>=0.27", "httpx2>=2.7", "certifi>=2026.10.19"]
 
 [project.scripts]
 argus-forge = "argus_forge.cli:app"

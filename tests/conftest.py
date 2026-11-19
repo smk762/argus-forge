@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from collections.abc import Callable
 from pathlib import Path
 
@@ -29,6 +30,17 @@ def _isolate_server_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     for name in SERVER_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_gpu_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No GPU coordinator unless a test asks for one: a broker URL in the shell must not gate test runs."""
+    from argus_forge import gpu
+
+    for name in list(os.environ):
+        if name.startswith("ARGUS_GPU_") or name == gpu.VRAM_ENV:
+            monkeypatch.delenv(name, raising=False)
+    gpu._cached_coordinator.cache_clear()
 
 
 @pytest.fixture

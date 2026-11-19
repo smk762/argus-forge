@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import math
+import re
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,9 +21,16 @@ def map_path(path: Path | str, path_map: dict[str, str]) -> str:
     """
     s = str(path)
     for src in sorted(path_map, key=len, reverse=True):
-        if s == src or s.startswith(src + "/"):
-            dst = path_map[src]
-            mapped = (dst if dst != "/" else "") + s[len(src) :]
+        if not src:
+            continue
+        # Tolerate a trailing slash on a key a caller didn't normalize — notably the
+        # root "/", which must match every absolute path, not only ones starting "//".
+        prefix = src.rstrip("/")
+        if s in (src, prefix):
+            return path_map[src]
+        if s.startswith(prefix + "/"):
+            # Strip the target's trailing slash too ("/" becomes ""), or "/mnt/x/" + "/a" doubles it.
+            mapped = path_map[src].rstrip("/") + s[len(prefix) :]
             return mapped or "/"
     return s
 
@@ -113,6 +122,10 @@ class EmitContext:
         )
 
 
+_TOML_INT_MIN, _TOML_INT_MAX = -(2**63), 2**63 - 1
+_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
 def toml_value(value: object) -> str:
     """Render a scalar (or flat list) as TOML.
 
@@ -122,9 +135,29 @@ def toml_value(value: object) -> str:
     JSON's ``\\ud83d\\udcc1`` surrogate-pair escapes for non-BMP characters
     (emoji in a mapped host path, say) are invalid TOML, while the raw UTF-8
     characters are fine in both.
+
+    Where JSON and TOML part ways it is handled here: non-finite floats use
+    TOML's ``nan``/``inf`` spellings, DEL (U+007F, legal raw in JSON but not in a
+    TOML string) is escaped, and values TOML cannot hold — an integer outside
+    signed 64-bit, a lone surrogate from an undecodable host path — raise
+    ``ValueError`` instead of producing a file the trainer cannot parse.
     """
-    if isinstance(value, bool | int | float | str):
-        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, bool):
+        return json.dumps(value)
+    if isinstance(value, int):
+        if not _TOML_INT_MIN <= value <= _TOML_INT_MAX:
+            raise ValueError(f"integer {value} does not fit TOML's signed 64-bit range")
+        return str(value)
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "nan"
+        if math.isinf(value):
+            return "inf" if value > 0 else "-inf"
+        return json.dumps(value)
+    if isinstance(value, str):
+        if _SURROGATE.search(value):
+            raise ValueError(f"string {value!r} contains an undecodable (surrogate) character; TOML cannot hold it")
+        return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
     if isinstance(value, list | tuple):
         return "[" + ", ".join(toml_value(v) for v in value) + "]"
     raise TypeError(f"cannot render {type(value).__name__} as TOML")

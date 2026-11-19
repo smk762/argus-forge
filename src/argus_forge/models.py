@@ -13,7 +13,7 @@ literals every suite stage uses, no local copy to drift.
 
 from __future__ import annotations
 
-from pathlib import PurePosixPath
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Literal
 
 # Re-exported: the rest of forge (and consumers) import the taxonomy from here.
@@ -70,6 +70,10 @@ LEGACY_ROOT_ENV = "FORGE_EXPORT_PATH"
 READONLY_ENV = "ARGUS_FORGE_READONLY"
 # Comma-separated browser origins allowed to call the API.
 CORS_ORIGINS_ENV = "FORGE_CORS_ORIGINS"
+# Comma-separated host names (no port) this server is reached by. A page served
+# from the server's own host:port (e.g. /docs) may write only when that host is
+# an IP literal, localhost, or listed here: argus-cortex's DNS-rebinding guard.
+TRUSTED_HOSTS_ENV = "FORGE_TRUSTED_HOSTS"
 
 # Every env var the server reads. Tests clear these so a value exported in a
 # developer's shell cannot decide whether the security tests pass.
@@ -79,6 +83,7 @@ SERVER_ENV_VARS: tuple[str, ...] = (
     LEGACY_ROOT_ENV,
     READONLY_ENV,
     CORS_ORIGINS_ENV,
+    TRUSTED_HOSTS_ENV,
 )
 
 
@@ -125,7 +130,18 @@ class ManifestRow(BaseModel):
             if not self.exported_path.strip():
                 raise ValueError("exported_path is empty")
             rel = PurePosixPath(self.exported_path)
-            if rel.is_absolute() or ".." in rel.parts:
+            win = PureWindowsPath(self.exported_path)
+            if (
+                rel.is_absolute()
+                or ".." in rel.parts
+                # "." / "./" normalise to no parts: the export root itself, not a file in it.
+                or not rel.parts
+                # The curator writes posix paths; a backslash or drive/UNC prefix is a
+                # Windows path that a native join would treat as traversal or another root.
+                or "\\" in self.exported_path
+                or win.drive
+                or win.is_absolute()
+            ):
                 raise ValueError(f"exported_path {self.exported_path!r} must be a relative path inside the export root")
         elif manifest_major(self.manifest_version) in MAJORS_REQUIRING_EXPORTED_PATH:
             raise ValueError(
@@ -257,6 +273,17 @@ class ForgeResult(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+# The only keys a run's caller-supplied ``env`` may set: where the trainer
+# checkout lives (each emitted train.sh reads exactly one of the first two) and
+# which GPU / model cache it uses. Anything else, loader and interpreter hooks
+# above all (``LD_*``, ``BASH_ENV``, ``ENV``, ``PATH``, ``PYTHON*``), could
+# change what code runs, so ``runner.prepare_run`` refuses it. A CLI user who
+# needs more sets it in their own shell, which the run inherits.
+RUN_ENV_KEYS: frozenset[str] = frozenset(
+    {"SD_SCRIPTS_DIR", "DIFFUSERS_SCRIPT", "CUDA_VISIBLE_DEVICES", "HF_HOME", "HF_HUB_OFFLINE"}
+)
+
+
 class RunRequest(BaseModel):
     """POST /run — execute a forged trainer config by shelling out to its train.sh."""
 
@@ -265,6 +292,7 @@ class RunRequest(BaseModel):
     # Extra environment for the trainer process — typically where its checkout
     # lives, e.g. {"SD_SCRIPTS_DIR": "/home/you/kohya-ss/sd-scripts"} for kohya
     # or {"DIFFUSERS_SCRIPT": "/home/you/.../train_...py"} for diffusers.
+    # Keys outside RUN_ENV_KEYS are refused.
     env: dict[str, str] = Field(default_factory=dict)
     # Resolve and report the command without executing it.
     dry_run: bool = False
@@ -351,12 +379,7 @@ WIRE_MODELS: tuple[type[BaseModel], ...] = (
 
 
 def wire_schema() -> dict:
-    """Combined JSON Schema for forge's wire contract (all WIRE_MODELS)."""
-    from pydantic.json_schema import models_json_schema
+    """Combined JSON Schema for forge's wire contract (all WIRE_MODELS), via argus-cortex's suite-wide builder."""
+    from argus_cortex.wire import wire_schema as build
 
-    _, schema = models_json_schema(
-        [(m, "serialization") for m in WIRE_MODELS],
-        title="argus-forge wire contract",
-        ref_template="#/$defs/{model}",
-    )
-    return schema
+    return build(WIRE_MODELS, title="argus-forge wire contract")

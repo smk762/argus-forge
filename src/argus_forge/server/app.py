@@ -69,6 +69,7 @@ from argus_forge.models import (
     CORS_ORIGINS_ENV,
     LEGACY_ROOT_ENV,
     READONLY_ENV,
+    TRUSTED_HOSTS_ENV,
     DatasetInfo,
     ForgeError,
     ForgeRequest,
@@ -212,6 +213,7 @@ def create_app(
     cors_allow_any: bool = False,
     export_root: str | None = None,
     allow_run: bool | None = None,
+    trusted_hosts: list[str] | None = None,
 ) -> FastAPI:
     """Create the forge FastAPI application.
 
@@ -231,6 +233,10 @@ def create_app(
     (demo-safe mode) the app renders configs but never trains or writes: every
     ``/run`` route is 403, ``POST /config`` is forced to ``dry_run``, and
     ``GET /health`` reports ``training: disabled``.
+
+    *trusted_hosts* (default ``FORGE_TRUSTED_HOSTS``) names the hosts this server
+    is reached by, so a page it serves itself (``/docs``) can write when it is
+    reached by a DNS name; IP literals and ``localhost`` need no entry.
     """
     registry = JobRegistry()
 
@@ -282,7 +288,8 @@ def create_app(
     # before CORSMiddleware so CORS ends up the outer layer (add_middleware
     # inserts at 0) and can still annotate a refused write, so the caller sees a
     # readable 403 rather than an opaque CORS error.
-    app.add_middleware(WriteGuard, refuse=cross_site_refuse(named))
+    raw_hosts = trusted_hosts if trusted_hosts is not None else (os.environ.get(TRUSTED_HOSTS_ENV) or "").split(",")
+    app.add_middleware(WriteGuard, refuse=cross_site_refuse(named, trusted_hosts=[h for h in raw_hosts if h.strip()]))
 
     if cors_enabled:
         from fastapi.middleware.cors import CORSMiddleware

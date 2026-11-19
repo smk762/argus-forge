@@ -12,12 +12,16 @@ The audit API base URL is `$AI_AUDIT_PUBLIC_BASE_URL`. The real host/IP is in th
    CLI equivalent: `ai-audit packs --bundle --repo argus-forge`.
 2. **Claim** the specialist pack you pick:
    `POST $AI_AUDIT_PUBLIC_BASE_URL/audit/packs/<id>/status` `{"status":"claimed"}`
-   (send `X-API-Token: $AI_AUDIT_API_TOKEN`).
+   (send `X-API-Token: $AI_AUDIT_API_TOKEN`; the token is in your environment, set for Claude Code
+   in `~/.claude/settings.json`. If it is empty or you get a 401, ask the user; don't search env files).
 3. **Fix:** `ai-audit repair --pack-id <id>` (agent-composer repair loop; fetches the pack for you;
    HTTP: `POST http://127.0.0.1:9150/api/repair/run` `{"pack_id":"<id>","mode":"review"}`),
    or read `GET $AI_AUDIT_PUBLIC_BASE_URL/audit/packs/<id>` / `.../brief` and implement it yourself.
 4. **Close:** `POST $AI_AUDIT_PUBLIC_BASE_URL/audit/validate_patch` `{"repo":"argus-forge","patch":"<diff>","pack_id":"<id>"}`
    — a passing run marks the pack `resolved`.
+
+**Search** before crawling: `GET $AI_AUDIT_PUBLIC_BASE_URL/audit/search?q=<question>&repo=argus-forge&kind=wiki`
+(wiki sections and packs with links; CLI `ai-audit search "<question>" --repo argus-forge`).
 
 World-model constraints (ownership, boundaries, scan branch `dev`) win over guesswork.
 Full flow: ai-code-auditor `AGENTS.md`.

@@ -35,7 +35,7 @@ COPY . /app
 # The cache mount keeps wheel downloads across builds even when this layer runs.
 RUN --mount=type=cache,target=/root/.cache/uv \
     SETUPTOOLS_SCM_PRETEND_VERSION="${VERSION}" \
-    uv pip install --system "certifi>=2026.10.19" ".[server,cli]"
+    uv pip install --system "certifi>=2026.10.19" ".[server,cli,gpu]"
 
 FROM python:3.11-slim AS runtime-base
 
@@ -56,6 +56,8 @@ RUN apt-get update \
 # single-stage image) is a build tool and never runs here.
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin/argus-forge /usr/local/bin/argus-forge
+# The argus-iris tenant manifest; compose's ARGUS_GPU_TENANT_MANIFEST points here (#41).
+COPY gpu-tenant.yaml /app/gpu-tenant.yaml
 
 # Both docker-compose.yaml and the README's `docker run -v ...:/data/out` use
 # this path. Without a default the published image starts, answers /health with

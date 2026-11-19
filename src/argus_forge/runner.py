@@ -9,9 +9,11 @@ Trust model: ``/run`` executes a script forge generated, on the shared dataset
 volume — the single-user LAN assumption of ``/config``. But note this is *not*
 sandboxed: the environment is caller-supplied and a trainer script runs real
 code, so treat reaching the port as equivalent to shell access on the host.
-:data:`BLOCKED_ENV_KEYS` refuses the env vars that would let a request silently
-redirect *what* runs (before the forged script); it is defence-in-depth, not a
-sandbox.
+A request's env may set only :data:`~argus_forge.models.RUN_ENV_KEYS` (where
+the trainer checkout lives, which GPU and model cache): every loader, shell and
+interpreter hook is refused. The child inherits the server's environment less
+the suite's own secrets (:data:`SECRET_ENV_KEYS`). This is defence-in-depth, not
+a sandbox.
 """
 
 from __future__ import annotations
@@ -24,10 +26,12 @@ import uuid
 from collections.abc import AsyncIterator
 
 import structlog
+from argus_cortex.gpu import GpuCoordinator
 
+from argus_forge import gpu
 from argus_forge.emitters import TRAINER_INFO
 from argus_forge.manifest import FORGE_DIR_NAME, resolve_export_dir
-from argus_forge.models import ForgeError, RunEvent, RunRequest
+from argus_forge.models import RUN_ENV_KEYS, ForgeError, RunEvent, RunRequest
 
 logger = structlog.get_logger()
 
@@ -37,12 +41,17 @@ logger = structlog.get_logger()
 # can't silently break runnability.
 RUNNABLE_TRAINERS: tuple[str, ...] = tuple(t for t, info in TRAINER_INFO.items() if info.entrypoint)
 
-# Env vars refused from caller-supplied env: each lets a request redirect what
-# executes before/instead of the forged script — bash sources BASH_ENV/ENV for
-# non-interactive shells, the dynamic loader honours LD_PRELOAD/LD_AUDIT, and
-# PATH decides which binary the bare name "bash" below even resolves to (set it
-# to a directory holding an attacker's ./bash and the forged script never runs).
-BLOCKED_ENV_KEYS: frozenset[str] = frozenset({"BASH_ENV", "ENV", "LD_PRELOAD", "LD_AUDIT", "PATH"})
+# The suite's own credentials in the server's environment. A trainer script
+# never needs them, and it runs third-party code (sd-scripts, pip packages), so
+# they are dropped from the environment it inherits.
+SECRET_ENV_KEYS: frozenset[str] = frozenset({"ARGUS_GPU_BROKER_TOKEN", "ARGUS_ADMIN_TOKEN", "AI_AUDIT_API_TOKEN"})
+
+
+def child_env(req: RunRequest) -> dict[str, str]:
+    """The trainer's environment: the server's own, less :data:`SECRET_ENV_KEYS`, plus the request's allowed keys."""
+    base = {k: v for k, v in os.environ.items() if k not in SECRET_ENV_KEYS}
+    return {**base, **req.env}
+
 
 # Bytes read per stdout pull. Reading in chunks (not readline) means no single
 # line can exceed a buffer limit, and carriage-return progress bars stream.
@@ -68,9 +77,11 @@ def prepare_run(req: RunRequest) -> tuple[list[str], str]:
     entrypoint = TRAINER_INFO[req.trainer].entrypoint
     if not entrypoint:
         raise ForgeError(f"trainer {req.trainer!r} has no launcher to run (runnable: {', '.join(RUNNABLE_TRAINERS)})")
-    blocked = sorted(k for k in req.env if k in BLOCKED_ENV_KEYS)
-    if blocked:
-        raise ForgeError(f"env may not set {', '.join(blocked)} — they redirect what code runs, not just where it runs")
+    refused = sorted(k for k in req.env if k not in RUN_ENV_KEYS)
+    if refused:
+        raise ForgeError(
+            f"env may not set {', '.join(refused)}: a run's env may set only {', '.join(sorted(RUN_ENV_KEYS))}"
+        )
     export_dir = resolve_export_dir(req.export_dir)
     script = export_dir / FORGE_DIR_NAME / req.trainer / entrypoint
     if not script.is_file():
@@ -86,7 +97,8 @@ async def _iter_output_lines(stream: asyncio.StreamReader) -> AsyncIterator[str]
     Chunked (not readline) so no line-length limit applies and ``\\r`` progress
     bars stream incrementally; CR/LF are single ASCII bytes that never appear
     inside a UTF-8 multibyte sequence, so splitting on them at the byte level is
-    safe. Empty segments (a bare ``\\r\\n`` boundary, trailing separators) are
+    safe. A forced cut (see ``_MAX_SEGMENT``) is moved back to a character
+    boundary so it cannot split a multibyte sequence. Empty segments (a bare ``\\r\\n`` boundary, trailing separators) are
     skipped. The whole stream is always drained to EOF — the reader never stops
     early, so the child can't wedge on a full pipe.
     """
@@ -100,8 +112,9 @@ async def _iter_output_lines(stream: asyncio.StreamReader) -> AsyncIterator[str]
             idx = _first_separator(buf)
             if idx < 0:
                 if len(buf) >= _MAX_SEGMENT:  # bound memory on separator-less output
-                    yield bytes(buf[:_MAX_SEGMENT]).decode("utf-8", "replace")
-                    del buf[:_MAX_SEGMENT]
+                    cut = _char_boundary(buf, _MAX_SEGMENT)
+                    yield bytes(buf[:cut]).decode("utf-8", "replace")
+                    del buf[:cut]
                     continue
                 break
             if idx > 0:  # skip empties from adjacent separators
@@ -109,6 +122,22 @@ async def _iter_output_lines(stream: asyncio.StreamReader) -> AsyncIterator[str]
             del buf[: idx + 1]
     if buf:
         yield bytes(buf).decode("utf-8", "replace")
+
+
+def _char_boundary(buf: bytearray, cut: int) -> int:
+    """*cut* moved back (at most 3 bytes) so it doesn't land inside a UTF-8 sequence.
+
+    A byte of the form ``10xxxxxx`` continues the previous character; cutting
+    before one would decode both halves as U+FFFD. Invalid UTF-8 (a longer run
+    of continuation bytes) is cut at *cut* as before.
+    """
+    for back in range(4):
+        i = cut - back
+        if i <= 0:
+            break
+        if i >= len(buf) or (buf[i] & 0xC0) != 0x80:
+            return i
+    return cut
 
 
 def _first_separator(buf: bytearray) -> int:
@@ -122,26 +151,57 @@ def _first_separator(buf: bytearray) -> int:
     return min(cr, lf)
 
 
+# How long a run's process group gets after SIGTERM before SIGKILL.
+_TERM_GRACE_S = 5.0
+_GROUP_POLL_S = 0.05
+
+
 async def _terminate(proc: asyncio.subprocess.Process) -> None:
     """Stop the child's process group so a cancelled/failed run leaves nothing
     orphaned (``accelerate`` is a grandchild of ``bash``; the child is a group
-    leader via ``start_new_session``). SIGTERM is sent synchronously so it fires
-    even while the surrounding task is being cancelled; SIGKILL escalates if it
-    lingers."""
-    if proc.returncode is not None:
-        return
-    _signal_group(proc, signal.SIGTERM)
-    with contextlib.suppress(Exception):
-        await asyncio.wait_for(asyncio.shield(proc.wait()), timeout=5)
-    if proc.returncode is None:
-        _signal_group(proc, signal.SIGKILL)
+    leader via ``start_new_session``, so its pgid is its pid — recorded at spawn,
+    not looked up from the leader, which may already be reaped).
+
+    Escalation is decided by the *group*, not the leader: bash typically exits on
+    SIGTERM at once while its trainer workers linger, and a leader that already
+    exited can leave workers behind. SIGTERM is sent synchronously so it fires
+    even while the surrounding task is being cancelled; SIGKILL follows in a
+    ``finally`` if anything in the group outlives the grace, so a second
+    cancellation arriving during the grace cannot skip it."""
+    pgid = proc.pid
+    if not _signal_group(pgid, signal.SIGTERM):
+        return  # nothing left in the group
+    try:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _TERM_GRACE_S
+        while _signal_group(pgid, 0) and loop.time() < deadline:
+            if proc.returncode is None:
+                # Wake on the leader's exit, but keep polling the group after it.
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(proc.wait()), timeout=_GROUP_POLL_S)
+            else:
+                await asyncio.sleep(_GROUP_POLL_S)
+    finally:
+        _signal_group(pgid, signal.SIGKILL)
 
 
-def _signal_group(proc: asyncio.subprocess.Process, sig: int) -> None:
-    if proc.returncode is not None:
-        return
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(os.getpgid(proc.pid), sig)
+def _signal_group(pgid: int, sig: int) -> bool:
+    """Send *sig* to process group *pgid*; False if the group no longer exists."""
+    try:
+        os.killpg(pgid, sig)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+class _RunFailed(Exception):
+    """Raised inside the GPU lease so the coordinator records a failed (or OOM) run, then swallowed."""
+
+
+# Trainer output that means the card ran out of memory; the broker learns from an `oom` release.
+_OOM_MARKERS = ("CUDA out of memory", "OutOfMemoryError", "CUBLAS_STATUS_ALLOC_FAILED")
 
 
 async def astream_run(
@@ -149,14 +209,21 @@ async def astream_run(
     *,
     run_id: str | None = None,
     resolved: tuple[list[str], str] | None = None,
+    coordinator: GpuCoordinator | None = None,
 ) -> AsyncIterator[RunEvent]:
     """Launch the forged trainer and yield its lifecycle + log events.
 
     Emits ``start`` (the resolved command), then one ``log`` per output line,
-    then a terminal event: ``error`` if the process could not be launched, else
-    ``exit`` with the return code. ``dry_run`` stops after ``start``. Every path
-    ends in exactly one terminal event, and the child's process group is always
-    reaped (finally), even on cancellation / consumer disconnect.
+    then a terminal event: ``error`` if the GPU lease was not granted or the
+    process could not be launched, else ``exit`` with the return code.
+    ``dry_run`` stops after ``start``. Every path ends in exactly one terminal
+    event, and the child's process group is always reaped (finally), even on
+    cancellation / consumer disconnect.
+
+    The trainer runs under a GPU lease from *coordinator* (default: the
+    environment's, see :mod:`argus_forge.gpu`; ``none`` when unset, which
+    grants at once). The lease is released *before* the terminal event is
+    yielded, so whoever acts on ``exit`` (an argus-proof eval) finds the GPU free.
 
     *resolved* is a pre-computed ``(command, cwd)`` (from :func:`prepare_run`)
     the server threads in to avoid re-validating; the CLI passes None.
@@ -168,7 +235,44 @@ async def astream_run(
     if req.dry_run:
         return
 
-    env = {**os.environ, **req.env}
+    try:
+        coord = coordinator if coordinator is not None else gpu.coordinator()
+    except gpu.LeaseNotGranted as exc:
+        yield RunEvent(run_id=run_id, type="error", message=f"GPU lease not granted: {exc}")
+        return
+    gated = coord.name != "none"
+    if gated:
+        yield RunEvent(run_id=run_id, type="log", message=f"[argus-forge] waiting for a GPU lease ({coord.name})")
+
+    terminal: RunEvent | None = None
+    try:
+        async with gpu.lease_training(coord, run_id) as lease:
+            if gated:
+                where = f" on {lease.node}" if lease.node else ""
+                yield RunEvent(
+                    run_id=run_id, type="log", message=f"[argus-forge] GPU lease granted via {lease.via}{where}"
+                )
+            oom = False
+            async with contextlib.aclosing(_run_process(command, cwd, child_env(req), run_id)) as events:
+                async for ev in events:
+                    if ev.type == "log":
+                        oom = oom or any(m in (ev.message or "") for m in _OOM_MARKERS)
+                        yield ev
+                    else:
+                        terminal = ev
+            if terminal is not None and (terminal.type == "error" or terminal.returncode != 0):
+                why = "out of memory" if oom else (terminal.message or f"exit {terminal.returncode}")
+                raise _RunFailed(why)
+    except gpu.LeaseNotGranted as exc:
+        terminal = RunEvent(run_id=run_id, type="error", message=f"GPU lease not granted: {exc}")
+    except _RunFailed:
+        pass
+    if terminal is not None:
+        yield terminal
+
+
+async def _run_process(command: list[str], cwd: str, env: dict[str, str], run_id: str) -> AsyncIterator[RunEvent]:
+    """Run *command* and yield one ``log`` per output line, then ``exit`` (or ``error`` if it could not launch)."""
     logger.info("run_start", run_id=run_id, command=command, cwd=cwd)
     try:
         proc = await asyncio.create_subprocess_exec(

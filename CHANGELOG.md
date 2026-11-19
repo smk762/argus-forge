@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-19
+
+### Added
+
+- `schema/forge-parity.json` (#45): forge's answers to `suggest_training_params` and `dataset_size_status` for every
+  category at each size-guide boundary, plus the kohya `dataset.toml` / `config.toml` it renders for demo-mode
+  inputs, parsed. argus-studio pins it like a wire schema and checks its hand-written twins (`types.ts`,
+  `forgeDemo.ts`) against it. `tests/test_studio_parity.py` fails when it goes stale; regenerate with
+  `UPDATE_PARITY=1`.
+- **GPU lease for training, through argus-iris (#41).** Every run (`POST /run`, `argus-forge run`) holds one
+  lease from argus-cortex's GPU coordinator for the whole of `train.sh`. It is an exclusive whole-card lease:
+  kind `train`, `background` priority, not preemptible, pinned to morpheus, 22000 MiB (`FORGE_GPU_VRAM_MB`).
+  `ARGUS_GPU_COORDINATOR=broker` with `ARGUS_GPU_BROKER_URL`, `ARGUS_GPU_BROKER_TOKEN` and
+  `ARGUS_GPU_TENANT_MANIFEST` asks iris; when iris is unreachable or has no lease routes yet (it is
+  observe-only today) the lease comes from `ARGUS_GPU_BROKER_FALLBACK` (`lease` by default). The default
+  is `none`, which leaves runs as they were. A lease that is not granted ends the run in an `error` event
+  before anything runs. The lease is released before the terminal event, reporting the run's outcome (`ok`,
+  `failed`, `oom` or `cancelled`) and the peak VRAM sampled through NVML.
+- `gpu-tenant.yaml`, the tenant manifest iris registers. It is validated by cortex's `TenantManifest`, and
+  the image ships it at `/app/gpu-tenant.yaml`.
+- `gpu` extra (`argus-cortex[gpu,remote,yaml]`), installed in both images.
+- `FORGE_TRUSTED_HOSTS` (and `create_app(trusted_hosts=)`): the host names forge is reached by.
+
+### Changed
+
+- argus-cortex `>=0.6,<0.10` (was `>=0.4.7`). Since cortex 0.6, a write from a page on the server's own
+  host:port is refused when that host is a bare DNS name (DNS rebinding), unless the name is in
+  `FORGE_TRUSTED_HOSTS`. IP literals and `localhost` are unaffected.
+- docker-compose mounts the host-wide GPU lock dir (`ARGUS_GPU_LOCK_DIR`, default `/tmp/argus-gpu`) and passes the
+  `ARGUS_GPU_*` variables through.
+
+### Fixed
+
+- A GPU lease that fails for a reason other than a timeout or refusal (an unknown `ARGUS_GPU_COORDINATOR`, an
+  unwritable lock dir, `broker` without the `gpu` extra) ends the run in an `error` event. It used to escape the
+  run with no terminal event: a traceback from `argus-forge run`.
+- A path-map target with a trailing slash (`/mnt/x/`) no longer renders doubled slashes (`/mnt/x//a`).
+- README: the GPU host in the iris and `FORGE_TRUSTED_HOSTS` examples is the `<GPU_HOST>` placeholder, so the
+  argus-handbook docs sync passes its opsec gate again.
+- A run's `env` is an allowlist now (`SD_SCRIPTS_DIR`, `DIFFUSERS_SCRIPT`, `CUDA_VISIBLE_DEVICES`, `HF_HOME`,
+  `HF_HUB_OFFLINE`). The old blocklist missed `LD_LIBRARY_PATH`, `PYTHONPATH`, `PYTHONSTARTUP` and other hooks that
+  change what code runs. Any other key is refused with 400. The trainer no longer inherits `ARGUS_GPU_BROKER_TOKEN`,
+  `ARGUS_ADMIN_TOKEN` or `AI_AUDIT_API_TOKEN` from the server's environment.
+- `dataset_size_status` matches argus-studio again: a count inside the good range but outside the ideal band is
+  "workable …; the sweet spot is ~X", not "in the sweet spot". Studio had changed its wording, so the /forge page
+  (forge's `size_hint`) and the /curate export panel showed different hints for the same set.
+- README: the symlinked-root example uses a placeholder host path (`/mnt/<NAS>/out`)
+
 ## [0.2.0] - 2026-11-13
 
 The first release since 0.1.1. On the image side it adds the `-train` variant
@@ -332,7 +380,8 @@ First tagged release — the version that publishes `ghcr.io/smk762/argus-forge`
   literal string `latest` for a non-semver `v*` tag; and `latest` is no longer
   repointed by a prerelease tag.
 
-[Unreleased]: https://github.com/smk762/argus-forge/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/smk762/argus-forge/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/smk762/argus-forge/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/smk762/argus-forge/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/smk762/argus-forge/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/smk762/argus-forge/releases/tag/v0.1.0

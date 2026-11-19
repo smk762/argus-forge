@@ -126,6 +126,21 @@ def test_collect_captions_never_overwrites(export_factory: ExportFactory) -> Non
     assert (export / "img_000.txt").read_text() == "caption 0"  # export-side sidecar wins
 
 
+def test_dry_run_does_not_warn_no_captions_when_the_run_would_collect_them(export_factory: ExportFactory) -> None:
+    """The preview must describe the run it previews: sidecars that the real run
+    collects mean the images will not train on the trigger phrase alone."""
+    export = export_factory(n=5, captions=0, source_captions=2)
+    result = forge_config(ForgeRequest(export_dir=str(export), trainer="kohya", dry_run=True))
+    assert result.captions_collected == 2
+    assert not any("no .txt captions found" in w for w in result.warnings)
+
+
+def test_dry_run_still_warns_when_nothing_would_be_collected(export_factory: ExportFactory) -> None:
+    export = export_factory(n=5, captions=0, source_captions=0)
+    result = forge_config(ForgeRequest(export_dir=str(export), trainer="kohya", dry_run=True))
+    assert any("no .txt captions found" in w for w in result.warnings)
+
+
 def test_dry_run_writes_nothing(export_factory: ExportFactory) -> None:
     export = export_factory(n=5, source_captions=2)
     result = forge_config(ForgeRequest(export_dir=str(export), trainer="kohya", dry_run=True))
@@ -362,11 +377,29 @@ def test_base_model_checkpoint_path_is_remapped(export_factory: ExportFactory) -
 
 
 def test_hf_repo_id_base_model_is_never_remapped(export_factory: ExportFactory) -> None:
+    """A repo id is not a path: even a map key that *would* prefix-match it (were
+    it treated as one) leaves it alone, while a real checkpoint path is remapped."""
     export = export_factory(n=3)
+    repo = "stabilityai/stable-diffusion-xl-base-1.0"
+    path_map = {"stabilityai": "/host/models/stabilityai", repo: "/x", str(export): "/host/out"}
     result = forge_config(
-        ForgeRequest(export_dir=str(export), trainer="kohya", dry_run=True, path_map={str(export): "/host/out"})
+        ForgeRequest(export_dir=str(export), trainer="kohya", dry_run=True, base_model=repo, path_map=path_map)
     )
-    assert result.base_model == "stabilityai/stable-diffusion-xl-base-1.0"
+    assert result.base_model == repo
+    config = tomllib.loads(next(f.content for f in result.files if f.name.endswith("config.toml")))
+    assert config["pretrained_model_name_or_path"] == repo
+
+    # Contrast: the same map shape does rewrite a local checkpoint path.
+    local = forge_config(
+        ForgeRequest(
+            export_dir=str(export),
+            trainer="kohya",
+            dry_run=True,
+            base_model="/data/models/ck.safetensors",
+            path_map={"/data/models": "/host/models"},
+        )
+    )
+    assert local.base_model == "/host/models/ck.safetensors"
 
 
 def test_unmatched_path_map_warns_instead_of_claiming_remap(export_factory: ExportFactory) -> None:
@@ -415,23 +448,136 @@ def test_no_unmapped_container_path_escapes_any_emitter(export_factory: ExportFa
             path_map={str(export): "/host/out", "/data/models": "/host/models"},
         )
     )
+    assert result.files, "an emitter that writes nothing would pass vacuously"
+    assert result.base_model == "/host/models/ck.safetensors"
     for f in result.files:
         if f.name.endswith("README.md"):
             continue
-        assert str(export) not in f.content, f"unmapped container path leaked into {f.name}"
+        for container_prefix in (str(export), "/data/models"):
+            assert container_prefix not in f.content, f"unmapped container path {container_prefix} leaked into {f.name}"
 
 
 def test_path_map_longest_prefix_wins_and_no_partial_component_match(export_factory: ExportFactory) -> None:
+    """Keys are container-side prefixes matched against the export path: the most
+    specific one wins regardless of dict order, and a key that is only a *string*
+    prefix of it (``.../myse`` for ``.../myset``) stops mid-component and must
+    never match."""
     export = export_factory(n=5)
+    partial = str(export)[:-1]  # a string prefix of the export path, not a path-component prefix
+    orders = (
+        {str(export.parent): "/short", partial: "/wrong", str(export): "/host/out"},
+        {str(export): "/host/out", partial: "/wrong", str(export.parent): "/short"},
+    )
+    for path_map in orders:
+        result = forge_config(ForgeRequest(export_dir=str(export), trainer="kohya", dry_run=True, path_map=path_map))
+        dataset = tomllib.loads(next(f.content for f in result.files if f.name.endswith("dataset.toml")))
+        assert dataset["datasets"][0]["subsets"][0]["image_dir"] == "/host/out"
+
+    # With only the partial key and the parent, the parent (a real component prefix) applies.
     result = forge_config(
         ForgeRequest(
             export_dir=str(export),
             trainer="kohya",
             dry_run=True,
-            # A sibling-prefix entry must not clobber the more specific one, and
-            # "/host/outer" must not match a "/host/out" prefix by string accident.
-            path_map={str(export.parent): "/short", str(export): "/host/out"},
+            path_map={partial: "/wrong", str(export.parent): "/short"},
         )
     )
     dataset = tomllib.loads(next(f.content for f in result.files if f.name.endswith("dataset.toml")))
-    assert dataset["datasets"][0]["subsets"][0]["image_dir"] == "/host/out"
+    assert dataset["datasets"][0]["subsets"][0]["image_dir"] == f"/short/{export.name}"
+
+
+def test_map_path_root_key_matches_every_absolute_path() -> None:
+    from argus_forge.emitters.base import map_path
+
+    assert map_path("/data/x.png", {"/": "/mnt/host"}) == "/mnt/host/data/x.png"
+    assert map_path("/", {"/": "/mnt/host"}) == "/mnt/host"
+    assert map_path("/data/out/a", {"/data/out/": "/h"}) == "/h/a"  # unnormalized trailing slash
+    assert map_path("/data/output", {"/data/out/": "/h"}) == "/data/output"  # still component-bounded
+    assert map_path("/data/out/a", {"/data/out": "/h/"}) == "/h/a"  # nor a doubled slash from the target
+    assert map_path("/data/out/a", {"/data/out": "/h", "/": "/root"}) == "/h/a"  # longest wins
+
+
+@pytest.mark.parametrize(("value", "want"), [(float("nan"), "nan"), (float("inf"), "inf"), (float("-inf"), "-inf")])
+def test_toml_value_non_finite_floats_are_toml_spellings(value: float, want: str) -> None:
+    from argus_forge.emitters.base import toml_value
+
+    assert toml_value(value) == want
+    assert tomllib.loads(f"x = {toml_value(value)}")["x"] == pytest.approx(value, nan_ok=True)
+
+
+def test_toml_value_escapes_del() -> None:
+    from argus_forge.emitters.base import toml_value
+
+    rendered = toml_value("a\x7fb")
+    assert tomllib.loads(f"x = {rendered}")["x"] == "a\x7fb"
+
+
+def test_toml_value_rejects_lone_surrogates() -> None:
+    from argus_forge.emitters.base import toml_value
+
+    with pytest.raises(ValueError, match="surrogate"):
+        toml_value(os.fsdecode(b"/data/\xff.png"))
+
+
+@pytest.mark.parametrize("value", [2**63, -(2**63) - 1])
+def test_toml_value_rejects_out_of_range_ints(value: int) -> None:
+    from argus_forge.emitters.base import toml_value
+
+    with pytest.raises(ValueError, match="64-bit"):
+        toml_value(value)
+
+
+def test_toml_value_int_bounds_and_bools_still_render() -> None:
+    from argus_forge.emitters.base import toml_value
+
+    assert tomllib.loads(f"x = {toml_value(2**63 - 1)}")["x"] == 2**63 - 1
+    assert tomllib.loads(f"x = {toml_value(-(2**63))}")["x"] == -(2**63)
+    assert toml_value(True) == "true"
+
+
+@pytest.mark.parametrize(
+    ("precision", "dtype"), [("bf16", "BFLOAT_16"), ("fp16", "FLOAT_16"), ("fp32", "FLOAT_32"), ("no", "FLOAT_32")]
+)
+def test_onetrainer_maps_precision_explicitly(export_factory: ExportFactory, precision: str, dtype: str) -> None:
+    export = export_factory(n=5)
+    result = forge_config(
+        ForgeRequest(export_dir=str(export), trainer="onetrainer", overrides=ParamOverrides(precision=precision))
+    )
+    config = json.loads((export / "forge/onetrainer/config.json").read_text())
+    assert config["train_dtype"] == dtype
+    assert not any("train_dtype" in w for w in result.warnings)
+
+
+def test_onetrainer_unknown_precision_warns(export_factory: ExportFactory) -> None:
+    export = export_factory(n=5)
+    result = forge_config(
+        ForgeRequest(export_dir=str(export), trainer="onetrainer", overrides=ParamOverrides(precision="fp8"))
+    )
+    assert any("train_dtype" in w and "'fp8'" in w for w in result.warnings)
+
+
+@pytest.mark.parametrize(
+    ("scheduler", "want"),
+    [("cosine", "COSINE"), ("constant", "CONSTANT"), ("cosine_with_restarts", "COSINE_WITH_RESTARTS")],
+)
+def test_onetrainer_maps_known_schedulers(export_factory: ExportFactory, scheduler: str, want: str) -> None:
+    export = export_factory(n=5)
+    result = forge_config(
+        ForgeRequest(export_dir=str(export), trainer="onetrainer", overrides=ParamOverrides(scheduler=scheduler))
+    )
+    config = json.loads((export / "forge/onetrainer/config.json").read_text())
+    assert config["learning_rate_scheduler"] == want
+    assert not any("learning_rate_scheduler" in w for w in result.warnings)
+
+
+@pytest.mark.parametrize("scheduler", ["constant_with_warmup", "polynomial"])
+def test_onetrainer_unmapped_scheduler_warns_instead_of_inventing_an_enum(
+    export_factory: ExportFactory, scheduler: str
+) -> None:
+    export = export_factory(n=5)
+    result = forge_config(
+        ForgeRequest(export_dir=str(export), trainer="onetrainer", overrides=ParamOverrides(scheduler=scheduler))
+    )
+    config = json.loads((export / "forge/onetrainer/config.json").read_text())
+    assert config["learning_rate_scheduler"] != scheduler.upper()
+    assert any("learning_rate_scheduler" in w and scheduler in w for w in result.warnings)

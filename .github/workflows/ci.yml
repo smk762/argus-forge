@@ -18,3 +18,7 @@ jobs:
       test-extras: "dev,server,cli"
       post-test: "uv run --no-sync argus-forge schema --check"
 
+  suite-rules:
+    # argus-ci suite rules: lint rules that each eliminate a finding class. New violations fail;
+    # existing ones are in .suite-rules-baseline.json, which may only shrink.
+    uses: smk762/argus-ci/.github/workflows/suite-rules.yml@v1

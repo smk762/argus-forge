@@ -139,7 +139,9 @@ def test_run_unrunnable_trainer_is_400(client: TestClient, tmp_path: Path) -> No
     assert "no launcher" in resp.json()["detail"]
 
 
-@pytest.mark.parametrize("key", ["LD_PRELOAD", "BASH_ENV", "ENV", "LD_AUDIT", "PATH"])
+@pytest.mark.parametrize(
+    "key", ["LD_PRELOAD", "BASH_ENV", "ENV", "LD_AUDIT", "PATH", "LD_LIBRARY_PATH", "PYTHONPATH", "PYTHONSTARTUP"]
+)
 def test_run_blocked_env_is_400(client: TestClient, tmp_path: Path, key: str) -> None:
     """Every key that redirects *what* runs, not just where. PATH belongs here:
     the command is the bare name "bash", so a caller-supplied PATH pointing at a
@@ -217,9 +219,9 @@ def test_failed_launch_reports_the_reason(client: TestClient, tmp_path: Path) ->
     """A run that can't be launched (NUL in an env value) surfaces why on the
     polled RunState, not only in the event stream."""
     export = forge_stub(tmp_path, "kohya", "echo hi\n")
-    run_id = client.post("/run", json={"export_dir": str(export), "trainer": "kohya", "env": {"X": "a\x00b"}}).json()[
-        "run_id"
-    ]
+    run_id = client.post(
+        "/run", json={"export_dir": str(export), "trainer": "kohya", "env": {"HF_HOME": "a\x00b"}}
+    ).json()["run_id"]
     final = _wait_terminal(client, run_id)
     assert final["status"] == "failed"
     assert final["message"] and "failed to launch" in final["message"]
@@ -293,12 +295,13 @@ def test_readonly_refuses_run(readonly_client: TestClient, tmp_path: Path) -> No
         pytest.param({"export_dir": "x", "trainer": "bogus"}, id="unknown-trainer"),
     ],
 )
-def test_readonly_refuses_run_before_validating(readonly_client: TestClient, body: dict) -> None:
+def test_readonly_refuses_run_before_validating(readonly_client: TestClient, client: TestClient, body: dict) -> None:
     """A schema-invalid request gets the same 403, not a 422 implying it could work.
 
     The guard is middleware precisely so it lands ahead of FastAPI's body
     validation; an in-handler check cannot, since the 422 is raised first.
     """
+    assert client.post("/run", json=body).status_code == 422  # the body really is schema-invalid
     assert readonly_client.post("/run", json=body).status_code == 403
 
 
@@ -326,12 +329,22 @@ def test_readonly_config_is_forced_to_dry_run(readonly_client: TestClient, expor
     Without this, an anonymous curl overwrites the curator's metadata.jsonl and
     plants an executable train.sh on the shared volume.
     """
-    export = export_factory(n=10)
-    resp = readonly_client.post("/config", json={"export_dir": str(export), "trainer": "kohya"})
-    assert resp.status_code == 200
-    assert resp.json()["files"]  # still rendered...
-    assert not (export / "forge").exists()  # ...but nothing on disk
-    assert all(f["path"] is None for f in resp.json()["files"])
+    export = export_factory(n=10, source_captions=3)  # collectable sidecars: also a write
+    (export / "metadata.jsonl").write_text('{"curator": "original"}\n', encoding="utf-8")
+
+    def snapshot() -> dict[str, bytes]:
+        return {str(p.relative_to(export)): p.read_bytes() for p in sorted(export.rglob("*")) if p.is_file()}
+
+    before = snapshot()
+    # diffusers is the trainer that writes metadata.jsonl at the dataset root.
+    for trainer in ("kohya", "diffusers"):
+        resp = readonly_client.post("/config", json={"export_dir": str(export), "trainer": trainer})
+        assert resp.status_code == 200
+        assert resp.json()["files"]  # still rendered...
+        assert all(f["path"] is None for f in resp.json()["files"])
+    assert snapshot() == before  # ...but nothing on disk changed: no metadata.jsonl overwrite, no sidecars
+    assert not (export / "forge").exists()
+    assert not list(export.rglob("train.sh"))
 
 
 def test_readonly_mode_comes_from_the_env(tmp_path: Path) -> None:
@@ -517,6 +530,32 @@ def test_caption_sources_outside_the_root_are_refused(client: TestClient, tmp_pa
     assert not (export / "a.txt").exists()
     assert "hunter2" not in json.dumps(body)
     assert any("outside the export root" in w for w in body["warnings"])
+
+
+def test_caption_source_refusal_does_not_reveal_whether_the_file_exists(client: TestClient, tmp_path: Path) -> None:
+    """The fence runs before any probe of the untrusted path: an outside source is
+    refused the same way whether or not its sidecar exists, so the refused count is
+    not an existence oracle for files outside the root."""
+    outside = tmp_path.parent / f"{tmp_path.name}-probe"
+    outside.mkdir(exist_ok=True)
+    (outside / "present.txt").write_text("x", encoding="utf-8")
+
+    warnings = {}
+    for name in ("present", "absent"):
+        export = tmp_path / f"set-{name}"
+        export.mkdir()
+        (export / "a.png").write_bytes(b"x")
+        row = {
+            "manifest_version": "2.0",
+            "rel_path": "a.png",
+            "abs_path": str(outside / f"{name}.png"),
+            "exported_path": "a.png",
+        }
+        (export / "manifest.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+        body = client.post("/config", json={"export_dir": f"set-{name}", "trainer": "kohya", "dry_run": True}).json()
+        warnings[name] = [w for w in body["warnings"] if "outside the export root" in w]
+    assert warnings["present"]
+    assert warnings["present"] == warnings["absent"]
 
 
 def test_no_export_root_refuses_everything() -> None:
@@ -794,3 +833,23 @@ def test_caption_source_root_is_not_a_request_field() -> None:
     assert "caption_source_root" not in ForgeRequest.model_fields
     req = ForgeRequest(export_dir="/x", trainer="kohya", caption_source_root="/")
     assert not hasattr(req, "caption_source_root")
+
+
+@pytest.mark.parametrize("via", ["arg", "env"])
+def test_same_host_write_by_dns_name_needs_a_trusted_host(
+    tmp_path: Path, export_factory: ExportFactory, monkeypatch: pytest.MonkeyPatch, via: str
+) -> None:
+    """cortex refuses a same-host write by bare DNS name (rebinding) unless the host is trusted:
+    /docs reached as http://morpheus:8103 can only drive POST /config with FORGE_TRUSTED_HOSTS=morpheus."""
+    export = export_factory(n=5)
+    req = {"json": {"export_dir": str(export), "trainer": "kohya", "dry_run": True}}
+    headers = {"Origin": "http://morpheus:8103", "Host": "morpheus:8103"}
+    with TestClient(create_app(export_root=str(tmp_path))) as c:
+        assert c.post("/config", headers=headers, **req).status_code == 403
+    if via == "env":
+        monkeypatch.setenv("FORGE_TRUSTED_HOSTS", " morpheus ,")
+        app = create_app(export_root=str(tmp_path))
+    else:
+        app = create_app(export_root=str(tmp_path), trusted_hosts=["morpheus"])
+    with TestClient(app) as c:
+        assert c.post("/config", headers=headers, **req).status_code == 200

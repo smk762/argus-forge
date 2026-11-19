@@ -135,6 +135,31 @@ async def test_lease_not_granted_is_an_error_and_nothing_runs(tmp_path: Path) ->
     assert not sentinel.exists()
 
 
+@pytest.mark.parametrize(
+    "refuse",
+    [OSError("Permission denied: /run/argus-gpu"), RuntimeError("the 'broker' GPU coordinator needs: pip install")],
+)
+async def test_any_lease_failure_is_a_terminal_error(tmp_path: Path, refuse: BaseException) -> None:
+    """A lease that fails for any reason (unwritable lock dir, missing extra) still ends in one `error` event."""
+    sentinel = tmp_path / "ran"
+    coord = _Recording(refuse=refuse)
+    export = forge_stub(tmp_path, "kohya", f'touch "{sentinel}"\n')
+    events = await _collect(RunRequest(export_dir=str(export), trainer="kohya"), coordinator=coord)
+    assert events[-1].type == "error"
+    assert events[-1].message.startswith("GPU lease not granted: ")
+    assert not sentinel.exists()
+
+
+async def test_unknown_coordinator_env_is_a_terminal_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ARGUS_GPU_COORDINATOR", "borker")
+    sentinel = tmp_path / "ran"
+    export = forge_stub(tmp_path, "kohya", f'touch "{sentinel}"\n')
+    events = await _collect(RunRequest(export_dir=str(export), trainer="kohya"))
+    assert [ev.type for ev in events] == ["start", "error"]
+    assert "unknown GPU coordinator" in (events[-1].message or "")
+    assert not sentinel.exists()
+
+
 async def test_dry_run_takes_no_lease(tmp_path: Path) -> None:
     coord = _Recording()
     export = forge_stub(tmp_path, "kohya", "true\n")

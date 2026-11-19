@@ -493,6 +493,7 @@ def test_map_path_root_key_matches_every_absolute_path() -> None:
     assert map_path("/", {"/": "/mnt/host"}) == "/mnt/host"
     assert map_path("/data/out/a", {"/data/out/": "/h"}) == "/h/a"  # unnormalized trailing slash
     assert map_path("/data/output", {"/data/out/": "/h"}) == "/data/output"  # still component-bounded
+    assert map_path("/data/out/a", {"/data/out": "/h/"}) == "/h/a"  # nor a doubled slash from the target
     assert map_path("/data/out/a", {"/data/out": "/h", "/": "/root"}) == "/h/a"  # longest wins
 
 

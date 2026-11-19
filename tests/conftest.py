@@ -40,7 +40,7 @@ def _isolate_gpu_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in list(os.environ):
         if name.startswith("ARGUS_GPU_") or name == gpu.VRAM_ENV:
             monkeypatch.delenv(name, raising=False)
-    gpu.coordinator.cache_clear()
+    gpu._cached_coordinator.cache_clear()
 
 
 @pytest.fixture

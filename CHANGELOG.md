@@ -40,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A GPU lease that fails for a reason other than a timeout or refusal (an unknown `ARGUS_GPU_COORDINATOR`, an
+  unwritable lock dir, `broker` without the `gpu` extra) ends the run in an `error` event. It used to escape the
+  run with no terminal event: a traceback from `argus-forge run`.
+- A path-map target with a trailing slash (`/mnt/x/`) no longer renders doubled slashes (`/mnt/x//a`).
 - README: the GPU host in the iris and `FORGE_TRUSTED_HOSTS` examples is the `<GPU_HOST>` placeholder, so the
   argus-handbook docs sync passes its opsec gate again.
 - A run's `env` is an allowlist now (`SD_SCRIPTS_DIR`, `DIFFUSERS_SCRIPT`, `CUDA_VISIBLE_DEVICES`, `HF_HOME`,

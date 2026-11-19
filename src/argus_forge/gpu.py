@@ -46,7 +46,8 @@ PEAK_SAMPLE_S = 5.0
 
 
 class LeaseNotGranted(RuntimeError):
-    """The coordinator would not grant the run a GPU (timed out, refused, or the broker rejected the request)."""
+    """The coordinator would not grant the run a GPU (timed out, refused, the broker rejected the request, or
+    the coordinator could not be built or could not take its lock)."""
 
 
 def train_vram_mb() -> int:
@@ -65,20 +66,21 @@ def train_vram_mb() -> int:
 
 
 @functools.cache
-def coordinator() -> GpuCoordinator:
-    """The process's coordinator, built once so the broker registers the tenant manifest once."""
+def _cached_coordinator() -> GpuCoordinator:
     return coordinator_from_env()
 
 
-def _lease_errors() -> tuple[type[BaseException], ...]:
-    from argus_cortex.gpu import GpuLeaseRefused, GpuLeaseTimeout
+def coordinator() -> GpuCoordinator:
+    """The process's coordinator, built once so the broker registers the tenant manifest once.
 
-    errors: list[type[BaseException]] = [GpuLeaseTimeout, GpuLeaseRefused]
-    with contextlib.suppress(ImportError):
-        from argus_cortex.gpu_broker import BrokerError
-
-        errors.append(BrokerError)
-    return tuple(errors)
+    Raises :class:`LeaseNotGranted` when the environment names no usable coordinator
+    (an unknown ``ARGUS_GPU_COORDINATOR``, a bad lease timeout), so a run reports it
+    as its terminal ``error`` instead of crashing.
+    """
+    try:
+        return _cached_coordinator()
+    except Exception as exc:
+        raise LeaseNotGranted(f"no usable GPU coordinator: {exc}") from exc
 
 
 def _device(lease: GpuLease) -> int:
@@ -118,7 +120,12 @@ async def lease_training(
             constraints=GpuConstraints(node=LEASE_NODE),
         )
         lease = await cm.__aenter__()
-    except _lease_errors() as exc:
+    except Exception as exc:
+        # Not only a timeout, refusal or BrokerError: an unusable lock path (OSError,
+        # a planted symlink), a broker without the [remote] extra (RuntimeError) —
+        # anything that stops the lease — ends the run in an `error` event rather than
+        # escaping astream_run with no terminal event. Cancellation is a BaseException
+        # and still propagates.
         raise LeaseNotGranted(str(exc) or type(exc).__name__) from exc
 
     sampler: asyncio.Task[None] | None = None

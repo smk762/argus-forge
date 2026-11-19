@@ -235,7 +235,11 @@ async def astream_run(
     if req.dry_run:
         return
 
-    coord = coordinator if coordinator is not None else gpu.coordinator()
+    try:
+        coord = coordinator if coordinator is not None else gpu.coordinator()
+    except gpu.LeaseNotGranted as exc:
+        yield RunEvent(run_id=run_id, type="error", message=f"GPU lease not granted: {exc}")
+        return
     gated = coord.name != "none"
     if gated:
         yield RunEvent(run_id=run_id, type="log", message=f"[argus-forge] waiting for a GPU lease ({coord.name})")

@@ -29,8 +29,8 @@ def map_path(path: Path | str, path_map: dict[str, str]) -> str:
         if s in (src, prefix):
             return path_map[src]
         if s.startswith(prefix + "/"):
-            dst = path_map[src]
-            mapped = (dst if dst != "/" else "") + s[len(prefix) :]
+            # Strip the target's trailing slash too ("/" becomes ""), or "/mnt/x/" + "/a" doubles it.
+            mapped = path_map[src].rstrip("/") + s[len(prefix) :]
             return mapped or "/"
     return s
 

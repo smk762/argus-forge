@@ -214,7 +214,8 @@ argus-forge serve --cors-any --cors-origin https://demo.example --no-run --expor
 | `POST /config` | render configs; `dry_run: true` returns contents without writing |
 | `POST /run` | start the forged `train.sh` on a background job; returns the run's `RunState` (with `run_id`) — the run outlives the request |
 | `GET /runs` | list tracked runs |
-| `GET /run/{id}` | a run's status (poll for the terminal `status` + `returncode` — the argus-proof join) |
+| `GET /run/{id}` | a run's status (poll for the terminal `status` + `returncode` — the argus-proof join); a succeeded run's `lora` too |
+| `GET /run/{id}/lora` | a succeeded run's LoRA: `path`, `export_path` (relative to the export dir), `sha256`, `size_bytes`; 409 while it hasn't succeeded |
 | `GET /run/{id}/stream` | attach to a run: NDJSON `RunEvent`s, the retained tail then live; reconnect anytime |
 | `POST /run/{id}/cancel` | stop a run (SIGTERM→SIGKILL its process group) |
 
@@ -223,6 +224,19 @@ A run is started once (`POST /run`) and watched — or re-watched after a droppe
 `X-Training-Run-Id` header) is the join key for the argus-proof handoff. The `/curate` page's ExportPanel in
 [argus-studio](https://github.com/smk762/argus-studio) uses `/config` to forge a config right after an export
 (`docker compose --profile forge up`).
+
+When a run's trainer exits 0, forge finds the LoRA where the forged config says it goes (kohya's
+`output_dir` + `output_name`, diffusers' `--output_dir`) and hashes it before the run turns `succeeded`, so a
+poller that sees `succeeded` gets `lora` with it and never has to know a trainer's output layout. A trainer
+that exits 0 without leaving that file still ends `succeeded`, with no `lora` and a `message` naming where
+forge looked.
+
+**Runs survive a restart** when forge has a state directory (`--state-dir` or `ARGUS_FORGE_STATE_DIR`; the
+image sets `/var/lib/argus-forge` and the compose file mounts a volume there). Each run's `RunState` is saved
+there as JSON when it starts and when it ends, and reloaded at startup, the newest 64 finished runs kept.
+The event log isn't saved: a restored run's stream replays its `start` and its terminal event. A run that
+was still `running` when forge went away comes back `failed`, with a message saying its outcome is unknown.
+Without a state directory, runs are kept in memory only.
 
 > The local CLI `argus-forge run` streams live in your terminal and is independent of the server registry.
 
@@ -241,15 +255,16 @@ argus-forge serve --cors --no-run       # or: ARGUS_FORGE_READONLY=1 argus-forge
 
 `/inspect` and `/config` keep working. Every state-changing request (POST, PUT, PATCH, DELETE) to `/run` or a
 path under `/run/` is refused with **403** and a message saying training is disabled on this host. Today
-that is `POST /run` and `POST /run/{id}/cancel`. Reads are not refused: `GET /runs` returns an empty list
-and `GET /run/{id}` and `GET /run/{id}/stream` return 404, since no run can ever start. The refusal is
+that is `POST /run` and `POST /run/{id}/cancel`. Reads are not refused: `GET /runs` lists only runs restored
+from the state directory (none on a host that never trained), and any other id is a 404. The refusal is
 middleware, so it lands *before* the request body is validated (on such a host a malformed request deserves
 the same answer as a well-formed one), and it covers `/run` routes added later without a per-route guard to
 forget.
 
-Demo-safe also means **write**-safe: `POST /config` is forced to `dry_run`, so it renders and returns the
-files but never touches the volume, and says so in `warnings` — a caller that asked for a real write learns
-it did not happen from the body, not by noticing every file's `path` is null. Forge has no authentication,
+Demo-safe also means **write**-safe: `POST /config` renders only with `"dry_run": true`. A `/config` that asks
+to write (`dry_run` false or left out) is refused with the same **403**, before forge looks at the export dir,
+rather than quietly rendered as a preview a caller could mistake for a write and go on to train from
+([#52](https://github.com/smk762/argus-forge/issues/52)). Forge has no authentication,
 so on a publicly reachable host an ordinary `curl` would otherwise overwrite the curator's
 `metadata.jsonl` and leave an executable `train.sh` behind on shared storage.
 
@@ -312,4 +327,5 @@ Run `copier update` to pull template changes (CI, release, tooling).
 - argus-proof handoff: post-training validation ([argus-studio#4](https://github.com/smk762/argus-studio/issues/4)).
   `GET /run/{id}` now exposes a run's terminal `status` + `returncode` by `run_id` for the join.
 - run registry follow-ups ([#13](https://github.com/smk762/argus-forge/issues/13)): CLI management commands
-  (`runs` / `--attach` / `--cancel`), an optional single-flight guard, and durable run metadata across restarts.
+  (`runs` / `--attach` / `--cancel`) and an optional single-flight guard. (Run records now survive a restart:
+  `--state-dir`, [#52](https://github.com/smk762/argus-forge/issues/52).)

@@ -9,6 +9,7 @@ Routes:
     POST /run              -> RunState        (start a background run, return its id)
     GET  /runs             -> list[RunState]  (registry of tracked runs)
     GET  /run/{id}         -> RunState        (status; poll for terminal result)
+    GET  /run/{id}/lora    -> RunArtifact     (a succeeded run's LoRA: path, sha256, size)
     GET  /run/{id}/stream  -> NDJSON stream   (attach: retained + live events)
     POST /run/{id}/cancel  -> RunState        (stop the run's process group)
 
@@ -37,8 +38,10 @@ Because a run is real code execution on the host (see the trust note in
 a public demo, a GPU-less box — starts the app with ``allow_run=False``. That
 mode refuses every ``/run`` route with 403 *before* the body is validated (a
 :class:`WriteGuard`, so a route added later is covered without a guard to
-forget), and forces ``POST /config`` to ``dry_run``: an unauthenticated public
-host renders configs but never writes to the shared volume. The mode is
+forget), and refuses a ``POST /config`` that asks to write (``dry_run`` false or
+omitted) with the same 403: an unauthenticated public host renders configs but
+never writes to the shared volume, and a caller that wanted a write is told so
+rather than handed a preview it could mistake for one. The mode is
 advertised on ``GET /health`` as ``training``, so a frontend can disable its
 train button rather than discovering the 403 by clicking it.
 """
@@ -69,12 +72,14 @@ from argus_forge.models import (
     CORS_ORIGINS_ENV,
     LEGACY_ROOT_ENV,
     READONLY_ENV,
+    STATE_DIR_ENV,
     TRUSTED_HOSTS_ENV,
     DatasetInfo,
     ForgeError,
     ForgeRequest,
     ForgeResult,
     InspectRequest,
+    RunArtifact,
     RunEvent,
     RunRequest,
     RunState,
@@ -172,6 +177,10 @@ def _stream(job: Job) -> NDJSONResponse:
 TRAINING_DISABLED_DETAIL = (
     "training is disabled on this host — POST /config still renders configs (dry-run) to run elsewhere"
 )
+CONFIG_WRITE_DISABLED_DETAIL = (
+    "training is disabled on this host, so POST /config writes nothing — "
+    'send "dry_run": true to render the configs without writing them'
+)
 
 
 def env_readonly() -> bool:
@@ -214,6 +223,7 @@ def create_app(
     export_root: str | None = None,
     allow_run: bool | None = None,
     trusted_hosts: list[str] | None = None,
+    state_dir: str | None = None,
 ) -> FastAPI:
     """Create the forge FastAPI application.
 
@@ -231,14 +241,19 @@ def create_app(
 
     *allow_run* defaults to ``ARGUS_FORGE_READONLY``. With ``allow_run=False``
     (demo-safe mode) the app renders configs but never trains or writes: every
-    ``/run`` route is 403, ``POST /config`` is forced to ``dry_run``, and
-    ``GET /health`` reports ``training: disabled``.
+    ``/run`` route is 403, so is a ``POST /config`` that is not a ``dry_run``,
+    and ``GET /health`` reports ``training: disabled``.
+
+    *state_dir* (default ``ARGUS_FORGE_STATE_DIR``) keeps run records on disk so
+    a restart doesn't forget them (see :class:`~argus_forge.server.jobs.RunStore`);
+    unset, runs live in memory only.
 
     *trusted_hosts* (default ``FORGE_TRUSTED_HOSTS``) names the hosts this server
     is reached by, so a page it serves itself (``/docs``) can write when it is
     reached by a DNS name; IP literals and ``localhost`` need no entry.
     """
-    registry = JobRegistry()
+    raw_state = state_dir or os.environ.get(STATE_DIR_ENV) or None
+    registry = JobRegistry(Path(raw_state) if raw_state else None)
 
     if allow_run is None:
         allow_run = not env_readonly()
@@ -386,18 +401,18 @@ def create_app(
         except ForgeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.post("/config", response_model=ForgeResult)
+    TRAINING_DISABLED = {403: {"description": "training is disabled on this host"}}
+
+    @app.post("/config", response_model=ForgeResult, responses=TRAINING_DISABLED)
     async def config(req: ForgeRequest) -> ForgeResult:
-        # Whether the caller asked for a real write and demo-safe mode took it
-        # away. Reported as a warning below: a 200 whose files all have a null
-        # path is otherwise the only clue that nothing reached the volume.
-        forced_dry_run = not allow_run and not req.dry_run
-        if not allow_run:
+        if not allow_run and not req.dry_run:
             # A demo-safe host is unauthenticated and publicly reachable by
             # assumption, and a non-dry /config overwrites the curator's
             # metadata.jsonl and plants an executable train.sh on the shared
-            # volume. Render, never write.
-            req = req.model_copy(update={"dry_run": True})
+            # volume. Refused rather than quietly rendered as a dry run: a 200
+            # here reads as "written" to a caller that goes on to train (#52).
+            # Before the containment check, so nothing on disk is probed.
+            raise HTTPException(status_code=403, detail=CONFIG_WRITE_DISABLED_DETAIL)
 
         def work() -> ForgeResult:
             # Rewrite to the containment-checked path, so everything downstream
@@ -407,16 +422,10 @@ def create_app(
             # server-side argument, never a request field, so no caller can widen
             # its own fence.
             fenced = _fenced(req.export_dir)
-            result = forge_config(
+            return forge_config(
                 req.model_copy(update={"export_dir": str(fenced)}),
                 caption_source_root=str(resolved_root),
             )
-            if forced_dry_run:
-                result.warnings.append(
-                    "demo-safe mode: rendered dry-run only — nothing was written to the export dir "
-                    "(GET /health reports training: disabled)"
-                )
-            return result
 
         try:
             return await asyncio.to_thread(work)
@@ -428,8 +437,6 @@ def create_app(
             raise
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"forge failed: {exc}") from exc
-
-    TRAINING_DISABLED = {403: {"description": "training is disabled on this host"}}
 
     @app.post("/run", response_model=RunState, status_code=202, responses=TRAINING_DISABLED)
     async def run(req: RunRequest) -> RunState:
@@ -465,6 +472,21 @@ def create_app(
     @app.get("/run/{run_id}", response_model=RunState, responses=NOT_FOUND)
     async def run_status(job: Job = Depends(_require_job)) -> RunState:
         return job.state()
+
+    LORA_RESPONSES = {
+        404: {"description": "no such run, or the run left no LoRA where its config says"},
+        409: {"description": "the run has not succeeded (still running, failed, or cancelled)"},
+    }
+
+    @app.get("/run/{run_id}/lora", response_model=RunArtifact, responses=LORA_RESPONSES)
+    async def run_lora(job: Job = Depends(_require_job)) -> RunArtifact:
+        """The LoRA a succeeded run trained: its path, sha256 and size (also on ``RunState.lora``)."""
+        if job.status != "succeeded":
+            raise HTTPException(status_code=409, detail=f"run {job.run_id} is {job.status}, not succeeded")
+        if job.lora is None:
+            detail = "a dry run trains nothing" if job.req.dry_run else (job.message or "no LoRA was found")
+            raise HTTPException(status_code=404, detail=f"run {job.run_id} has no LoRA: {detail}")
+        return job.lora
 
     @app.get("/run/{run_id}/stream", response_class=NDJSONResponse, responses=NOT_FOUND)
     async def run_stream(job: Job = Depends(_require_job)) -> NDJSONResponse:

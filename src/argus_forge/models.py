@@ -74,6 +74,9 @@ CORS_ORIGINS_ENV = "FORGE_CORS_ORIGINS"
 # from the server's own host:port (e.g. /docs) may write only when that host is
 # an IP literal, localhost, or listed here: argus-cortex's DNS-rebinding guard.
 TRUSTED_HOSTS_ENV = "FORGE_TRUSTED_HOSTS"
+# Directory the server keeps run records in (one JSON file per run), so a
+# restart doesn't forget them. Unset: runs are kept in memory only.
+STATE_DIR_ENV = "ARGUS_FORGE_STATE_DIR"
 
 # Every env var the server reads. Tests clear these so a value exported in a
 # developer's shell cannot decide whether the security tests pass.
@@ -84,6 +87,7 @@ SERVER_ENV_VARS: tuple[str, ...] = (
     READONLY_ENV,
     CORS_ORIGINS_ENV,
     TRUSTED_HOSTS_ENV,
+    STATE_DIR_ENV,
 )
 
 
@@ -323,6 +327,24 @@ class RunEvent(BaseModel):
 RunStatus = Literal["running", "succeeded", "failed", "cancelled"]
 
 
+class RunArtifact(BaseModel):
+    """The LoRA a succeeded run left behind (``RunState.lora``, GET /run/{id}/lora).
+
+    Located from the forged config the run executed (kohya's ``output_dir`` +
+    ``output_name``, diffusers' ``--output_dir``), so a caller never has to know
+    a trainer's output layout, and hashed by forge once the trainer has exited.
+    """
+
+    # Absolute, as the trainer forge ran wrote it (the server's own view of the volume).
+    path: str
+    # *path* relative to the run's export_dir when it lies inside it (the usual
+    # case: ``forge/kohya/output/<name>.safetensors``), so a caller that mounts
+    # the shared volume elsewhere can still find it; None when it does not.
+    export_path: str | None = None
+    sha256: str
+    size_bytes: int
+
+
 class RunState(BaseModel):
     """A run's status in the server's job registry (GET /run/{id}, GET /runs).
 
@@ -343,6 +365,11 @@ class RunState(BaseModel):
     # Terminal detail — the launch/failure/cancel reason, when there is one — so
     # a poller can diagnose a ``failed``/``cancelled`` run without the event log.
     message: str | None = None
+    # The trained LoRA, set once a run has succeeded and its file was found and
+    # hashed (before ``status`` turns ``succeeded``, so a poller that sees
+    # ``succeeded`` sees this too). None for a dry run, or when the trainer
+    # exited 0 but left no file where its config said (``message`` says where).
+    lora: RunArtifact | None = None
 
 
 class TrainerInfo(BaseModel):
@@ -373,6 +400,7 @@ WIRE_MODELS: tuple[type[BaseModel], ...] = (
     ForgeResult,
     RunRequest,
     RunEvent,
+    RunArtifact,
     RunState,
     TrainerInfo,
 )

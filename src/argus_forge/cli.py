@@ -331,7 +331,12 @@ def serve(
     no_run: bool = Option(
         False,
         "--no-run",
-        help="Demo-safe mode: /config renders (dry-run only) but /run is refused with 403. Or ARGUS_FORGE_READONLY=1.",
+        help="Demo-safe mode: /run and a non-dry /config are refused with 403. Or ARGUS_FORGE_READONLY=1.",
+    ),
+    state_dir: str | None = Option(
+        None,
+        "--state-dir",
+        help="Keep run records here so a restart doesn't forget them (or ARGUS_FORGE_STATE_DIR); unset: in memory",
     ),
 ) -> None:
     """Start the argus-forge micro-server (FastAPI) on :8103."""
@@ -371,7 +376,7 @@ def serve(
         )
     if readonly:
         typer.echo(
-            "Demo-safe mode: /run is refused with 403 and /config renders dry-run only (nothing is written).",
+            "Demo-safe mode: /run, and a /config that isn't a dry run, are refused with 403 (nothing is written).",
             err=True,
         )
     if not resolved_root:
@@ -386,6 +391,7 @@ def serve(
         cors_allow_any=cors_any,
         export_root=export_root,
         allow_run=not readonly,
+        state_dir=state_dir,
     )
     uvicorn.run(application, host=host, port=port)
 

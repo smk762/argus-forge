@@ -33,13 +33,15 @@ import or API) belongs in argus-ci's `suite-rules/` catalogue rather than a test
 |---|---|
 | Change a `models.py` type in `wire_schema()` without regenerating `schema/forge-wire.schema.json` | CI post-test `argus-forge schema --check` (`.github/workflows/ci.yml`) |
 | Serve an `export_dir`, or copy a manifest caption source, from outside the server's `--export-root` (symlinks resolved) | `test_server::test_traversal_escape_is_refused`, `::test_symlink_plus_dotdot_cannot_escape_the_root`, `::test_absolute_path_outside_the_root_is_refused`, `::test_caption_sources_outside_the_root_are_refused` |
-| Read-only mode: run anything, validate a `/run` body before refusing it, write from `/config`, or turn off on an unparseable flag | `test_server::test_readonly_refuses_run_before_validating`, `::test_readonly_config_is_forced_to_dry_run`, `::test_unrecognised_readonly_value_fails_safe_not_fatal` |
+| Read-only mode: run anything, validate a `/run` body before refusing it, write from `/config` (or answer a writing `/config` with anything but 403), or turn off on an unparseable flag | `test_server::test_readonly_refuses_run_before_validating`, `::test_readonly_config_write_is_refused`, `::test_unrecognised_readonly_value_fails_safe_not_fatal` |
 | Add a write route that read-only mode doesn't cover (it must sit under `/run`, or be listed with why it writes nothing) | `test_rules::test_every_write_route_is_refused_or_known_safe_under_readonly` |
 | Accept a cross-site write, including under `--cors-any` | `test_server::test_cross_site_write_is_refused`, `::test_wildcard_still_refuses_cross_site_writes` |
 | Let a caller's env set anything outside `models.RUN_ENV_KEYS` (a loader, shell or interpreter hook changes what `/run` executes), or hand the trainer the suite's tokens | `test_runner::test_prepare_run_rejects_exec_hijacking_env`, `::test_trainer_does_not_inherit_suite_secrets`, `test_server::test_run_blocked_env_is_400` |
 | Leave a trainer running after its run is cancelled | `test_runner::test_cancelled_run_kills_the_process`, `test_jobs::test_double_cancel_does_not_orphan_the_trainer` |
 | Start a trainer without its GPU lease, or after the lease was refused or timed out | `test_gpu::test_run_takes_an_exclusive_background_lease`, `::test_lease_not_granted_is_an_error_and_nothing_runs` |
 | Send a run's terminal event while still holding its GPU lease | `test_gpu::test_lease_is_released_before_the_terminal_event` |
+| Report a run `succeeded` before its `lora` is set (a poller reads both together) | `test_lora::test_lora_is_set_before_the_run_turns_succeeded` |
+| Lose a run's record on restart when a state dir is set, or restore a run that was in flight as anything but `failed` | `test_lora::test_runs_survive_a_restart`, `::test_a_run_in_flight_at_a_crash_is_restored_failed` |
 | Report a failed or OOM run to the broker as `ok` | `test_gpu::test_failed_run_is_reported_to_the_coordinator`, `::test_through_cortex_broker_client` |
 | Let `gpu-tenant.yaml` drift from the lease the runner takes | `test_gpu::test_manifest_validates_and_matches_the_lease` |
 | Pair a caption with the wrong image on a basename collision (leave it uncaptioned) | `test_emitters::test_basename_collision_warns_and_skips_caption` |

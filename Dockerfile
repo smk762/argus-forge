@@ -65,6 +65,11 @@ COPY gpu-tenant.yaml /app/gpu-tenant.yaml
 # healthy-looking service the frontend cannot use.
 ENV ARGUS_FORGE_EXPORT_ROOT=/data/out
 
+# Run records (one JSON per run, its LoRA's path and sha256 included), so a
+# restart doesn't forget finished runs. Survives a container restart; mount a
+# volume here (docker-compose.yaml does) to survive a recreate too.
+ENV ARGUS_FORGE_STATE_DIR=/var/lib/argus-forge
+
 # Demo-safe by default: /config renders but never writes, and every /run route is
 # refused with 403. The default (`runtime`) image ships no trainer — no torch, no
 # sd-scripts — so a run could only ever fail, and the port is published on

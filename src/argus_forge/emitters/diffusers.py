@@ -12,11 +12,42 @@ script plus flags. Forge emits:
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 from argus_forge.emitters.base import EmitContext, sh
 from argus_forge.manifest import caption_path
-from argus_forge.models import GeneratedFile
+from argus_forge.models import ForgeError, GeneratedFile
+
+# The file train_text_to_image_lora_sdxl.py saves into --output_dir
+# (StableDiffusionXLPipeline.save_lora_weights' default weight_name).
+LORA_FILENAME = "pytorch_lora_weights.safetensors"
+_OUTPUT_FLAG = "--output_dir="
+
+
+def lora_file(out_dir: Path) -> Path:
+    """Where the run of the ``train.sh`` forged in *out_dir* writes its LoRA.
+
+    Read from the script's ``--output_dir=`` flag (the last one wins, as in
+    argparse), so a hand-edited script is followed: that file is what ran.
+    """
+    script = out_dir / "train.sh"
+    try:
+        text = script.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ForgeError(f"cannot read {script}: {exc}") from exc
+    found: str | None = None
+    for line in text.splitlines():
+        try:
+            words = shlex.split(line, comments=True)
+        except ValueError:
+            continue
+        for word in words:
+            if word.startswith(_OUTPUT_FLAG):
+                found = word[len(_OUTPUT_FLAG) :]
+    if not found:
+        raise ForgeError(f"{script} passes no {_OUTPUT_FLAG}")
+    return Path(found) / LORA_FILENAME
 
 
 def _caption_for(ctx: EmitContext, image_abs: str) -> str:

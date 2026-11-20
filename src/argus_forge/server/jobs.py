@@ -8,9 +8,16 @@ recent events buffered so a reconnecting viewer sees history + live progress,
 records terminal status for polling (the argus-proof join), and can be
 cancelled explicitly.
 
-Scope: in-process and single-server. A server restart forgets in-flight runs
-(and, because the trainer runs in its own session, can leave it running detached
-— see :mod:`argus_forge.runner`); durable run metadata is a follow-up.
+Scope: single-server. Given a state directory (``ARGUS_FORGE_STATE_DIR`` /
+``--state-dir``), every run's :class:`RunState` is also kept on disk, one JSON
+file per run (:class:`RunStore`), so a restart keeps finished runs, their LoRA
+included, and a poller can still learn how a run ended. The event log is not
+kept: a run restored from disk replays its ``start`` and its terminal event
+only. A run that was still ``running`` when the server went away is restored as
+``failed``: a graceful stop cancels it first (so it is saved ``cancelled``), and
+after a crash nothing is left driving it (the trainer runs in its own session
+and may still be running detached — see :mod:`argus_forge.runner`). Without a
+state directory, runs are in memory only, as before.
 
 This lives under ``server/`` rather than in the core package because the
 registry exists only to serve the HTTP layer — a CLI-only install has no reason
@@ -24,15 +31,19 @@ dependencies (structlog, and pydantic via :mod:`argus_forge.models`).
 from __future__ import annotations
 
 import asyncio
+import os
+import re
 from collections import deque
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from pathlib import Path
 
 import structlog
+from pydantic import ValidationError
 
 from argus_forge.manifest import resolve_export_dir
-from argus_forge.models import RunEvent, RunRequest, RunState, RunStatus
-from argus_forge.runner import astream_run, new_run_id
+from argus_forge.models import ForgeError, RunArtifact, RunEvent, RunRequest, RunState, RunStatus
+from argus_forge.runner import astream_run, lora_artifact, new_run_id
 
 logger = structlog.get_logger()
 
@@ -56,6 +67,66 @@ MAX_FINISHED_JOBS = 64
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+# The reason a run restored as `running` is reported failed.
+INTERRUPTED_MESSAGE = (
+    "forge stopped while this run was in progress, so its outcome is unknown "
+    "(after a crash its trainer may still be running detached)"
+)
+
+# A run id as new_run_id makes it; anything else in the state dir is not ours.
+_RUN_ID = re.compile(r"[0-9a-f]{32}")
+
+
+class RunStore:
+    """Run records on disk: ``<state_dir>/runs/<run_id>.json``, one RunState each.
+
+    Writes are atomic (a temp file renamed over the record), so a crash mid-save
+    leaves the previous record, never half of one. A failure to save is logged,
+    not raised: losing a record must not fail or wedge the run it describes.
+    """
+
+    def __init__(self, state_dir: Path) -> None:
+        self.dir = state_dir / "runs"
+
+    def _path(self, run_id: str) -> Path:
+        return self.dir / f"{run_id}.json"
+
+    def save(self, state: RunState) -> None:
+        path = self._path(state.run_id)
+        tmp = path.with_name(f".{path.name}.tmp")
+        try:
+            self.dir.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(state.model_dump_json(), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError as exc:
+            logger.error("run_record_save_failed", run_id=state.run_id, error=repr(exc))
+
+    def delete(self, run_id: str) -> None:
+        try:
+            self._path(run_id).unlink(missing_ok=True)
+        except OSError as exc:
+            logger.error("run_record_delete_failed", run_id=run_id, error=repr(exc))
+
+    def load(self) -> list[RunState]:
+        """Every readable record; an unreadable or foreign file is logged and skipped."""
+        if not self.dir.is_dir():
+            return []
+        states: list[RunState] = []
+        for path in sorted(self.dir.glob("*.json")):
+            if not _RUN_ID.fullmatch(path.stem):
+                continue
+            try:
+                state = RunState.model_validate_json(path.read_bytes())
+            except (OSError, ValidationError) as exc:
+                logger.warning("run_record_unreadable", path=str(path), error=repr(exc))
+                continue
+            if state.run_id != path.stem:
+                logger.warning("run_record_mismatched", path=str(path), run_id=state.run_id)
+                continue
+            states.append(state)
+        return states
 
 
 class _Viewer:
@@ -87,7 +158,9 @@ class Job:
     """One training run: the background task driving it, a bounded event buffer,
     and the set of viewers whose cursors read out of that buffer."""
 
-    def __init__(self, run_id: str, req: RunRequest, command: list[str], cwd: str) -> None:
+    def __init__(
+        self, run_id: str, req: RunRequest, command: list[str], cwd: str, store: RunStore | None = None
+    ) -> None:
         self.run_id = run_id
         self.req = req
         self.command = command
@@ -100,6 +173,8 @@ class Job:
         self.message: str | None = None
         self.started_at = _now()
         self.ended_at: str | None = None
+        self.lora: RunArtifact | None = None
+        self._store = store
         self._events: deque[RunEvent] = deque(maxlen=MAX_BUFFERED_EVENTS)
         # Count of every event ever published, so a viewer's cursor can be an
         # absolute sequence number that survives eviction from `_events`.
@@ -114,6 +189,41 @@ class Job:
         self._done = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._cancelling = False
+
+    @classmethod
+    def restore(cls, state: RunState, store: RunStore | None = None) -> Job:
+        """A finished job rebuilt from its saved record (see the module docstring).
+
+        A record still saying ``running`` is closed as ``failed`` and saved
+        that way. Its stream replays ``start`` and one terminal event.
+        """
+        req = RunRequest(export_dir=state.export_dir, trainer=state.trainer)
+        job = cls(state.run_id, req, list(state.command), state.cwd or "", store)
+        job.export_dir = state.export_dir
+        job.started_at = state.started_at
+        job.returncode = state.returncode
+        job.message = state.message
+        job.lora = state.lora
+        job._publish(RunEvent(run_id=job.run_id, type="start", command=job.command, cwd=state.cwd))
+        if state.status == "running":
+            job.message = INTERRUPTED_MESSAGE
+            job._publish(RunEvent(run_id=job.run_id, type="error", message=job.message))
+            job._finalize("failed")  # saves the corrected record
+            return job
+        if state.status == "cancelled":
+            job._publish(RunEvent(run_id=job.run_id, type="cancelled", message=job.message))
+        elif job.returncode is not None:
+            job._publish(RunEvent(run_id=job.run_id, type="exit", returncode=job.returncode))
+        elif state.status == "failed":
+            job._publish(RunEvent(run_id=job.run_id, type="error", message=job.message))
+        job.status = state.status
+        job.ended_at = state.ended_at
+        job._done.set()
+        return job
+
+    def save(self) -> None:
+        if self._store is not None:
+            self._store.save(self.state())
 
     @property
     def finished(self) -> bool:
@@ -131,6 +241,7 @@ class Job:
             command=self.command,
             cwd=self.cwd,
             message=self.message,
+            lora=self.lora,
         )
 
     @property
@@ -224,6 +335,7 @@ class Job:
         self.status = status
         self.ended_at = _now()
         self._done.set()
+        self.save()
         # Wake every viewer: each one drains what is left in the buffer, sees the
         # `finished` it read on its next pass, and ends its own iteration.
         for viewer in self._subscribers:
@@ -252,6 +364,14 @@ class Job:
                 elif ev.type == "error":
                     status = "failed"
                     self.message = ev.message  # a launch failure carries its reason here
+            if status == "succeeded" and not self.req.dry_run:
+                # Before _finalize, so a poller that sees `succeeded` sees the LoRA
+                # too. Off the loop: it hashes a file of hundreds of MB.
+                try:
+                    self.lora = await asyncio.to_thread(lora_artifact, self.req)
+                except ForgeError as exc:
+                    self.message = f"the trainer exited 0, but forge found no LoRA: {exc}"
+                    logger.warning("run_lora_missing", run_id=self.run_id, error=str(exc))
         except asyncio.CancelledError:
             # Explicit cancel: astream_run's finally already reaped the process
             # group. Emit a terminal `cancelled` event (not `error`, so a stream
@@ -316,8 +436,17 @@ class Job:
 class JobRegistry:
     """Runs keyed by run_id, with bounded retention of finished ones."""
 
-    def __init__(self) -> None:
+    def __init__(self, state_dir: Path | None = None) -> None:
+        """*state_dir* keeps run records across restarts (see :class:`RunStore`); None keeps them in memory only.
+
+        Loads the saved records (blocking, so call it at startup, not per request).
+        """
         self._jobs: dict[str, Job] = {}
+        self._store = RunStore(state_dir) if state_dir is not None else None
+        if self._store is not None:
+            for state in sorted(self._store.load(), key=lambda st: st.started_at):
+                self._jobs[state.run_id] = Job.restore(state, self._store)
+            self._evict()
 
     def start(self, req: RunRequest, command: list[str], cwd: str) -> Job:
         """Create a job and launch it on a background task (needs a running loop).
@@ -325,7 +454,8 @@ class JobRegistry:
         The task is independent of the caller, so the run continues after the
         request that started it returns or disconnects.
         """
-        job = Job(new_run_id(), req, command, cwd)
+        job = Job(new_run_id(), req, command, cwd, self._store)
+        job.save()  # so a restart mid-run knows the run existed
         job._task = asyncio.create_task(job._drive())
         self._jobs[job.run_id] = job
         self._evict()
@@ -354,3 +484,5 @@ class JobRegistry:
         finished = sorted((j for j in self._jobs.values() if j.finished), key=lambda j: j.ended_at or "")
         for job in finished[: max(0, len(finished) - MAX_FINISHED_JOBS)]:
             self._jobs.pop(job.run_id, None)
+            if self._store is not None:
+                self._store.delete(job.run_id)

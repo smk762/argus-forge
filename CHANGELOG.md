@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A run reports its LoRA (#52).** When a run's trainer exits 0, forge finds the LoRA where the forged config
+  says it goes (kohya's `output_dir` + `output_name`, diffusers' `--output_dir`), hashes it, and puts it on
+  `RunState.lora` (`path`, `export_path`, `sha256`, `size_bytes`) before the run turns `succeeded`.
+  `GET /run/{id}/lora` returns it alone: 409 while the run hasn't succeeded, 404 when it left no file. New wire
+  model `RunArtifact`.
+- **Run records survive a restart (#52).** With `--state-dir` / `ARGUS_FORGE_STATE_DIR`, each run's `RunState`
+  is saved as `<dir>/runs/<run_id>.json` when it starts and ends, and reloaded at startup (the newest 64
+  finished runs). A restored run's stream replays `start` and its terminal event; one still `running` when
+  forge went away comes back `failed`. The image sets `/var/lib/argus-forge` and the compose file mounts the
+  `forge-state` volume there. Unset, runs are in memory only, as before.
+
+### Changed
+
+- **Demo-safe mode refuses a writing `/config` (#52).** With training disabled, a `POST /config` whose
+  `dry_run` is false or omitted is now a 403 (as `/run` is) instead of a 200 dry run with a warning, so no
+  caller mistakes a preview for a write. Send `"dry_run": true` to render. argus-studio already does.
+
 ## [0.3.0] - 2026-11-19
 
 ### Added

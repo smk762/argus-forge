@@ -517,6 +517,42 @@
       "title": "ParamOverrides",
       "type": "object"
     },
+    "RunArtifact": {
+      "description": "The LoRA a succeeded run left behind (``RunState.lora``, GET /run/{id}/lora).\n\nLocated from the forged config the run executed (kohya's ``output_dir`` +\n``output_name``, diffusers' ``--output_dir``), so a caller never has to know\na trainer's output layout, and hashed by forge once the trainer has exited.",
+      "properties": {
+        "export_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Export Path"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "sha256": {
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "title": "Size Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "size_bytes"
+      ],
+      "title": "RunArtifact",
+      "type": "object"
+    },
     "RunEvent": {
       "description": "One NDJSON line streamed from a run.\n\n``run_id`` (the training_run_id) is stable for the whole run and is the join\nkey for downstream eval (argus-proof). ``type`` selects which fields are set:\n``start`` carries ``command`` + ``cwd``; ``log`` a line of trainer output in\n``message``; ``exit`` the ``returncode``; ``error`` a failure ``message``.\n``cancelled`` is the terminal event for a run stopped by request \u2014 distinct\nfrom ``error`` so a consumer never mistakes a user cancel for a failure.",
       "properties": {
@@ -667,6 +703,17 @@
         "export_dir": {
           "title": "Export Dir",
           "type": "string"
+        },
+        "lora": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RunArtifact"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "message": {
           "anyOf": [

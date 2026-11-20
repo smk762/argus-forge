@@ -23,6 +23,10 @@ services:
       # Containment root for request-supplied export_dir paths. Required — the
       # API refuses every /inspect, /config and /run without it.
       ARGUS_FORGE_EXPORT_ROOT: /data/out
+      # Run records (status, and a succeeded run's LoRA path + sha256), one JSON
+      # file per run, kept on the forge-state volume below so a restart or a
+      # recreate doesn't forget them.
+      ARGUS_FORGE_STATE_DIR: /var/lib/argus-forge
       # Demo-safe mode: /config renders (dry-run only) and POST /run is refused
       # with 403. Defaults ON because this image ships no trainer — no torch, no
       # sd-scripts — so a run could only ever fail, and the port is published on
@@ -66,9 +70,11 @@ services:
       # (argus-lens and argus-curator mount the same default) for the `lease`
       # coordinator and the broker's `lease` fallback.
       - ${ARGUS_GPU_LOCK_DIR:-/tmp/argus-gpu}:/run/argus-gpu
+      # Run records (ARGUS_FORGE_STATE_DIR above).
+      - forge-state:/var/lib/argus-forge
       # Train target: keep the multi-GB Hugging Face base-checkpoint download
-      # across container recreations — uncomment this and the `volumes:` block
-      # at the bottom (mirrors the README's `-v hf-cache:...` for docker run).
+      # across container recreations — uncomment this and `hf-cache:` in the
+      # `volumes:` block at the bottom (mirrors the README's `-v hf-cache:...`).
       # - hf-cache:/root/.cache/huggingface
     # Trainer dataloaders stage batches in /dev/shm (sd-scripts defaults to 8
     # workers) and docker's default is 64 MB — without this a live run dies
@@ -86,6 +92,7 @@ services:
     # gpus: all
     restart: unless-stopped
 
-# Uncomment together with the hf-cache mount above.
-# volumes:
-#   hf-cache:
+volumes:
+  forge-state:
+  # Uncomment together with the hf-cache mount above.
+  # hf-cache:

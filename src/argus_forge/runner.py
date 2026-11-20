@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import os
 import signal
 import uuid
@@ -29,9 +30,9 @@ import structlog
 from argus_cortex.gpu import GpuCoordinator
 
 from argus_forge import gpu
-from argus_forge.emitters import TRAINER_INFO
+from argus_forge.emitters import LORA_LOCATORS, TRAINER_INFO
 from argus_forge.manifest import FORGE_DIR_NAME, resolve_export_dir
-from argus_forge.models import RUN_ENV_KEYS, ForgeError, RunEvent, RunRequest
+from argus_forge.models import RUN_ENV_KEYS, ForgeError, RunArtifact, RunEvent, RunRequest
 
 logger = structlog.get_logger()
 
@@ -89,6 +90,44 @@ def prepare_run(req: RunRequest) -> tuple[list[str], str]:
             f"no forged config to run at {script} — run `argus-forge config {export_dir} --trainer {req.trainer}` first"
         )
     return ["bash", str(script)], str(script.parent)
+
+
+_HASH_CHUNK = 1 << 20
+
+
+def lora_artifact(req: RunRequest) -> RunArtifact:
+    """The LoRA a finished run of *req* left behind: where, its sha256 and size.
+
+    The location is read from the config forged for ``req.trainer`` (see
+    :data:`~argus_forge.emitters.LORA_LOCATORS`), i.e. the same file the trainer
+    read. Blocking (it hashes a file of hundreds of MB), so async callers hop to a
+    thread. Raises :class:`ForgeError` when the config names no output or the
+    file is not there.
+    """
+    locate = LORA_LOCATORS.get(req.trainer)
+    if locate is None:
+        raise ForgeError(f"trainer {req.trainer!r} has no known LoRA output")
+    export_dir = resolve_export_dir(req.export_dir)
+    path = locate(export_dir / FORGE_DIR_NAME / req.trainer)
+    if not path.is_absolute():
+        # Relative to the trainer's own cwd (its checkout), which forge doesn't know.
+        raise ForgeError(f"the forged config names a relative LoRA output ({path}); forge cannot tell where it is")
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with path.open("rb") as fh:
+            while chunk := fh.read(_HASH_CHUNK):
+                digest.update(chunk)
+                size += len(chunk)
+    except FileNotFoundError as exc:
+        raise ForgeError(f"no LoRA at {path}, where the forged config says the trainer writes it") from exc
+    except OSError as exc:
+        raise ForgeError(f"cannot read the LoRA at {path}: {exc}") from exc
+    try:
+        export_path: str | None = path.relative_to(export_dir).as_posix()
+    except ValueError:
+        export_path = None
+    return RunArtifact(path=str(path), export_path=export_path, sha256=digest.hexdigest(), size_bytes=size)
 
 
 async def _iter_output_lines(stream: asyncio.StreamReader) -> AsyncIterator[str]:

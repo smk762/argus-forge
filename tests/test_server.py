@@ -323,11 +323,13 @@ def test_readonly_still_renders_configs(readonly_client: TestClient, export_fact
     assert resp.json()["files"]
 
 
-def test_readonly_config_is_forced_to_dry_run(readonly_client: TestClient, export_factory: ExportFactory) -> None:
+def test_readonly_config_write_is_refused(readonly_client: TestClient, export_factory: ExportFactory) -> None:
     """A demo host is unauthenticated by assumption, so /config never writes.
 
     Without this, an anonymous curl overwrites the curator's metadata.jsonl and
-    plants an executable train.sh on the shared volume.
+    plants an executable train.sh on the shared volume. And a write is refused
+    (403), not quietly rendered as a dry run: a 200 read as "written" to a
+    caller that went on to train (#52).
     """
     export = export_factory(n=10, source_captions=3)  # collectable sidecars: also a write
     (export / "metadata.jsonl").write_text('{"curator": "original"}\n', encoding="utf-8")
@@ -338,11 +340,11 @@ def test_readonly_config_is_forced_to_dry_run(readonly_client: TestClient, expor
     before = snapshot()
     # diffusers is the trainer that writes metadata.jsonl at the dataset root.
     for trainer in ("kohya", "diffusers"):
-        resp = readonly_client.post("/config", json={"export_dir": str(export), "trainer": trainer})
-        assert resp.status_code == 200
-        assert resp.json()["files"]  # still rendered...
-        assert all(f["path"] is None for f in resp.json()["files"])
-    assert snapshot() == before  # ...but nothing on disk changed: no metadata.jsonl overwrite, no sidecars
+        for body in ({}, {"dry_run": False}):  # omitted means a write too
+            resp = readonly_client.post("/config", json={"export_dir": str(export), "trainer": trainer, **body})
+            assert resp.status_code == 403
+            assert "dry_run" in resp.json()["detail"]
+    assert snapshot() == before  # nothing on disk changed: no metadata.jsonl overwrite, no sidecars
     assert not (export / "forge").exists()
     assert not list(export.rglob("train.sh"))
 
@@ -773,25 +775,10 @@ def test_health_reports_the_undereferenced_spelling(tmp_path: Path, export_facto
         assert c.get("/health").json()["export_root"] == str(link)
 
 
-def test_readonly_config_warns_that_it_was_forced_to_dry_run(
-    readonly_client: TestClient, export_factory: ExportFactory
-) -> None:
-    """A caller that asked for a real write must learn from the body that it did
-    not happen, not have to infer it from every file's path being null."""
-    export = export_factory(n=5)
-    body = readonly_client.post("/config", json={"export_dir": str(export), "trainer": "kohya"}).json()
-    assert any("demo-safe" in w for w in body["warnings"])
-    assert not (export / "forge").exists()
-
-
-def test_asking_for_a_dry_run_is_not_reported_as_forced(
-    readonly_client: TestClient, export_factory: ExportFactory
-) -> None:
-    """The warning is about a *taken away* write, so it must not fire for a
-    caller who asked for a dry run in the first place."""
-    export = export_factory(n=5)
-    body = readonly_client.post("/config", json={"export_dir": str(export), "trainer": "kohya", "dry_run": True}).json()
-    assert not any("demo-safe" in w for w in body["warnings"])
+def test_readonly_config_write_is_refused_before_the_path_is_checked(readonly_client: TestClient) -> None:
+    """The refusal is the mode's answer, so it doesn't depend on (or probe) the export dir."""
+    resp = readonly_client.post("/config", json={"export_dir": "/nope/outside", "trainer": "kohya"})
+    assert resp.status_code == 403
 
 
 def test_named_origin_does_not_drop_the_localhost_defaults(tmp_path: Path, export_factory: ExportFactory) -> None:

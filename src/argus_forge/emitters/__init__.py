@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 from argus_forge.emitters import diffusers, kohya, onetrainer
 from argus_forge.emitters.base import EmitContext
@@ -40,4 +41,15 @@ TRAINER_INFO: dict[TrainerId, TrainerInfo] = {
     ),
 }
 
-__all__ = ["EMITTERS", "TRAINER_INFO", "EmitContext", "Emitter"]
+# Where a run of each runnable trainer writes its LoRA, read from the files
+# forged into its out dir (``<export>/forge/<trainer>``). Raises ForgeError when
+# those files don't say. Keyed like TRAINER_INFO's entrypoints: every trainer
+# forge can run has one (test_runner checks).
+LoraLocator = Callable[[Path], Path]
+
+LORA_LOCATORS: dict[TrainerId, LoraLocator] = {
+    "kohya": kohya.lora_file,
+    "diffusers": diffusers.lora_file,
+}
+
+__all__ = ["EMITTERS", "LORA_LOCATORS", "TRAINER_INFO", "EmitContext", "Emitter", "LoraLocator"]

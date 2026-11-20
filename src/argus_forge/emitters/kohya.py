@@ -10,9 +10,32 @@ Emits the two-file layout ``sdxl_train_network.py`` consumes natively:
 from __future__ import annotations
 
 import math
+import tomllib
+from pathlib import Path
 
 from argus_forge.emitters.base import EmitContext, toml_lines
-from argus_forge.models import GeneratedFile
+from argus_forge.models import ForgeError, GeneratedFile
+
+# sd-scripts names the final save `<output_name>.<save_model_as>`; the per-epoch
+# saves (`save_every_n_epochs`) are `<output_name>-<epoch:06d>.safetensors`.
+LORA_SUFFIX = ".safetensors"
+
+
+def lora_file(out_dir: Path) -> Path:
+    """Where the run of the config forged in *out_dir* writes its final LoRA.
+
+    Read from ``config.toml`` rather than recomputed, so a hand-edited
+    ``output_dir`` or ``output_name`` is followed: that file is what the trainer read.
+    """
+    config = out_dir / "config.toml"
+    try:
+        data = tomllib.loads(config.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ForgeError(f"cannot read {config}: {exc}") from exc
+    output_dir, output_name = data.get("output_dir"), data.get("output_name")
+    if not isinstance(output_dir, str) or not isinstance(output_name, str) or not output_name:
+        raise ForgeError(f"{config} names no output_dir and output_name")
+    return Path(output_dir) / f"{output_name}{LORA_SUFFIX}"
 
 
 def emit(ctx: EmitContext) -> list[GeneratedFile]:

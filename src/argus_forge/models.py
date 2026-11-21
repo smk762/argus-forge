@@ -95,6 +95,19 @@ class ForgeError(RuntimeError):
     """A user-facing failure: bad input dir, unreadable manifest, bad request."""
 
 
+class PoseLabels(BaseModel):
+    """The primary person's coarse body-pose labels on a curator 2.7+ row (argus-puppet's rules).
+
+    Plain strings, not literals: ``unknown`` is a real reading (the joints a rule
+    needs were not confident), and a value a newer puppet adds must not make a
+    manifest unreadable. Forge only counts these; it never re-derives them.
+    """
+
+    stance: str | None = None
+    arms: str | None = None
+    facing: str | None = None
+
+
 class ManifestRow(BaseModel):
     """One line of the curator's ``manifest.jsonl`` (the fields forge consumes).
 
@@ -116,6 +129,13 @@ class ManifestRow(BaseModel):
     primary_face_pose: str | None = None
     score: float = 0.0
     similar_group: int = 0
+    # Curator 2.7+: argus-puppet's body pose for the primary person. Absent on
+    # older rows (read as null). ``pose_cluster`` is a *scan-level* cluster id
+    # (0 the largest in the curator scan, not the export); null when the pose
+    # was unusable, not checked, or the scan was not clustered. Forge only
+    # counts them, for the pose-dominance warning (:mod:`argus_forge.pose`).
+    pose_labels: PoseLabels | None = None
+    pose_cluster: int | None = None
 
     @model_validator(mode="after")
     def _check_exported_path(self) -> ManifestRow:
@@ -389,6 +409,7 @@ class TrainerInfo(BaseModel):
 # Models that make up the HTTP/CLI wire contract, in schema order.
 WIRE_MODELS: tuple[type[BaseModel], ...] = (
     TargetProfile,
+    PoseLabels,
     ManifestRow,
     TrainingParams,
     ParamOverrides,

@@ -37,6 +37,12 @@ Along the way it:
   the ambiguous file uncaptioned instead of pairing it with the wrong caption,
 - emits one kohya subset per image directory (kohya's glob doesn't recurse — a structure-preserving export
   would otherwise train zero images),
+- **warns when one body pose dominates the set**: argus-curator's manifest 2.7 carries argus-puppet's
+  scan-level `pose_cluster` and `pose_labels` per row; when at least 10 of the images on disk have a cluster and
+  the most common one holds 75% or more of them, forge adds a warning naming the pose (e.g. "standing, arms
+  down, facing front") and how many images had no measured pose. Forge only counts what curator wrote: it
+  never measures poses or calls puppet, and the warning changes no repeats or configs. Older manifests: no
+  warning,
 - falls back gracefully to a bare folder of images with no manifest,
 - resolves the base checkpoint from the manifest's `target_profile.checkpoint` (or the SDXL base).
 

@@ -320,6 +320,29 @@
           "title": "Manifest Version",
           "type": "string"
         },
+        "pose_cluster": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pose Cluster"
+        },
+        "pose_labels": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PoseLabels"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "primary_face_cluster": {
           "anyOf": [
             {
@@ -515,6 +538,49 @@
         }
       },
       "title": "ParamOverrides",
+      "type": "object"
+    },
+    "PoseLabels": {
+      "description": "The primary person's coarse body-pose labels on a curator 2.7+ row (argus-puppet's rules).\n\nPlain strings, not literals: ``unknown`` is a real reading (the joints a rule\nneeds were not confident), and a value a newer puppet adds must not make a\nmanifest unreadable. Forge only counts these; it never re-derives them.",
+      "properties": {
+        "arms": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Arms"
+        },
+        "facing": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Facing"
+        },
+        "stance": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stance"
+        }
+      },
+      "title": "PoseLabels",
       "type": "object"
     },
     "RunArtifact": {

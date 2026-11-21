@@ -48,6 +48,7 @@ import or API) belongs in argus-ci's `suite-rules/` catalogue rather than a test
 | Emit an unmapped container path into a config the host trainer reads | `test_emitters::test_no_unmapped_container_path_escapes_any_emitter` |
 | Emit a kohya config that trains zero images from a structure-preserving export (one subset per image dir) | `test_emitters::test_kohya_nested_export_gets_subset_per_directory` |
 | Let heuristics or the kohya emitter drift from argus-studio's twins (`types.ts` `suggestTrainingParams` / `datasetSizeStatus`, `forgeDemo.ts`) | `test_studio_parity::test_parity_fixture_is_current` keeps `schema/forge-parity.json` in step with the code; argus-studio pins that file and `forgeParity.test.ts` checks its twins against it (its daily wire-drift job re-pulls it from `dev`). Regenerate with `UPDATE_PARITY=1` and change studio's twins along with it |
+| Compute pose metrics or call argus-puppet (the pose-dominance warning only counts curator's manifest `pose_cluster` / `pose_labels`) | `test_rules::test_forge_does_not_compute_pose_metrics_or_call_puppet` (no puppet, numeric-stack or HTTP-client import; no puppet endpoint or setting named) |
 | Re-implement something argus-cortex provides | `test_rules::test_forge_does_not_reimplement_cortex` (same-named functions and classes; a thin wrapper must import the original) |
 
 ## Facts the code doesn't make obvious

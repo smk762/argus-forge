@@ -111,3 +111,38 @@ def test_forge_does_not_reimplement_cortex() -> None:
                 rel = path.relative_to(SRC.parent)
                 clashes.append(f"{rel}:{node.lineno} {node.name} (cortex has {cortex[node.name]}.{node.name})")
     assert not clashes, "forge re-implements argus-cortex:\n" + "\n".join(clashes)
+
+
+# Imports that would mean forge measures or compares poses itself, or calls a service
+# (argus-puppet) rather than reading the manifest curator wrote. Forge's own HTTP need,
+# the GPU broker, goes through argus-cortex and is not imported here.
+POSE_FORBIDDEN_IMPORTS = {"argus_puppet", "numpy", "scipy", "sklearn", "httpx", "requests", "urllib", "aiohttp"}
+
+
+def test_forge_does_not_compute_pose_metrics_or_call_puppet() -> None:
+    """The pose-dominance warning only counts curator's ``pose_cluster`` / ``pose_labels``.
+
+    Pose embeddings, distances and clusters are argus-puppet's; a copy here would drift
+    from it. So no forge module imports puppet, a numeric stack, or an HTTP client, and
+    nothing names a puppet endpoint or setting.
+    """
+    found = []
+    for path in sorted(SRC.rglob("*.py")):
+        if path.name == "_version.py":
+            continue
+        rel = path.relative_to(SRC.parent)
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                roots = {a.name.split(".")[0] for a in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                roots = {node.module.split(".")[0]}
+            else:
+                roots = set()
+            found += [f"{rel}:{node.lineno} imports {r}" for r in sorted(roots & POSE_FORBIDDEN_IMPORTS)]
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and re.search(r"PUPPET_URL|ARGUS_PUPPET|/pose\b", node.value)
+            ):
+                found.append(f"{rel}:{node.lineno} names a puppet endpoint or setting")
+    assert not found, "forge must read pose from curator's manifest, not compute it:\n" + "\n".join(found)

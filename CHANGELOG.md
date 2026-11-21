@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Pose-dominance warning (curator manifest 2.7).** `ManifestRow` reads curator's optional `pose_labels`
+  (`{stance, arms, facing}`, values kept as plain strings so `unknown` and new values parse) and `pose_cluster`
+  (argus-puppet's scan-level body-pose cluster); both are null on older rows. When at least 10 rows of the
+  images on disk have a cluster and one cluster holds 75% or more of them (puppet's and proof's collapse cut-off,
+  uncalibrated on real sets), `ForgeResult.warnings` (and the CLI) gets one line: "N of M posed training images
+  share one body pose (standing, arms down, facing front); outputs are likely to collapse onto it — rebalance
+  the selection in curator", plus how many images had no measured pose when that is a quarter or more.
+  Warning only: repeats, heuristics, emitters and `schema/forge-parity.json` are unchanged. Forge counts
+  curator's values and never computes pose metrics or calls puppet (new must-never row and
+  `test_rules::test_forge_does_not_compute_pose_metrics_or_call_puppet`). New wire model `PoseLabels`.
 - **A run reports its LoRA (#52).** When a run's trainer exits 0, forge finds the LoRA where the forged config
   says it goes (kohya's `output_dir` + `output_name`, diffusers' `--output_dir`), hashes it, and puts it on
   `RunState.lora` (`path`, `export_path`, `sha256`, `size_bytes`) before the run turns `succeeded`.

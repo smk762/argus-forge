@@ -32,6 +32,7 @@ from argus_forge.models import (
     ForgeResult,
     ManifestRow,
 )
+from argus_forge.pose import pose_dominance_warning
 
 logger = structlog.get_logger()
 
@@ -190,6 +191,12 @@ def forge_config(req: ForgeRequest, *, caption_source_root: str | None = None) -
         warnings.append(
             f"manifest lists {info.manifest_rows} images but {info.image_count} were found — forging for what's on disk"
         )
+
+    # Curator 2.7+ rows carry puppet's pose cluster: warn when one pose dominates the
+    # images actually being trained (rows whose file is on disk). Warning only.
+    pose_note = pose_dominance_warning(row for row, dest in zip(rows, resolved, strict=True) if dest is not None)
+    if pose_note:
+        warnings.append(pose_note)
 
     collisions = exported_collisions(rows, resolved)
     for dest, rels in sorted(collisions.items()):

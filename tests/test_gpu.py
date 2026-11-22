@@ -111,9 +111,12 @@ async def test_lease_is_released_before_the_terminal_event(tmp_path: Path) -> No
     """Whoever acts on `exit` (an argus-proof eval) must find the GPU already free."""
     coord = _Recording()
     export = forge_stub(tmp_path, "kohya", "true\n")
+    released_at_exit: list[list[type[BaseException] | None]] = []
     async for ev in astream_run(RunRequest(export_dir=str(export), trainer="kohya"), coordinator=coord):
         if ev.type == "exit":
-            assert coord.exits == [None]
+            released_at_exit.append(list(coord.exits))
+    assert released_at_exit == [[None]]  # exactly one exit event, and the lease was already released at it
+    assert coord.exits == [None]
 
 
 async def test_failed_run_is_reported_to_the_coordinator(tmp_path: Path) -> None:
@@ -176,6 +179,24 @@ async def test_peak_vram_is_the_drop_below_the_launch_baseline(monkeypatch: pyte
                 break
             await asyncio.sleep(0.01)
     assert lease.peak_vram_mb == 11000
+
+
+async def _raising_stop(_task: asyncio.Task[None] | None) -> None:
+    raise RuntimeError("sampler stop failed")
+
+
+async def test_lease_is_released_when_stopping_the_sampler_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failing sampler stop must not skip the release, on a clean body or a failing one."""
+    monkeypatch.setattr(gpu, "_stop", _raising_stop)
+    clean = _Recording()
+    with pytest.raises(RuntimeError, match="sampler stop failed"):
+        async with gpu.lease_training(clean, "r"):
+            pass
+    failing = _Recording()
+    with pytest.raises(RuntimeError, match="sampler stop failed"):
+        async with gpu.lease_training(failing, "r"):
+            raise ValueError("body failed")
+    assert (clean.exits, failing.exits) == ([None], [ValueError])
 
 
 def _broker(log: list[tuple[str, dict]], *, lease_route: bool = True) -> BrokerCoordinator:

@@ -151,6 +151,25 @@ def test_prepare_run_accepts_the_allowlisted_env(tmp_path: Path) -> None:
     prepare_run(RunRequest(export_dir=str(export), trainer="kohya", env=env))
 
 
+async def test_disallowed_env_never_reaches_the_trainer_even_when_validation_is_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-resolved run (the server's path) skips prepare_run; child_env still drops non-allow-listed keys."""
+    hook = tmp_path / "hook.sh"
+    hook.write_text('echo "hooked"\n', encoding="utf-8")
+    monkeypatch.delenv("BASH_ENV", raising=False)
+    monkeypatch.delenv("FORGE_INJECTED", raising=False)
+    export = forge_stub(tmp_path, "kohya", 'echo "inj=${FORGE_INJECTED:-unset} hf=$HF_HOME"\n')
+    req = RunRequest(
+        export_dir=str(export),
+        trainer="kohya",
+        env={"BASH_ENV": str(hook), "FORGE_INJECTED": "yes", "HF_HOME": "/cache"},
+    )
+    script = export / "forge" / "kohya" / "train.sh"
+    events = await _collect(req, resolved=(["bash", str(script)], str(script.parent)))
+    assert [e.message for e in events if e.type == "log"] == ["inj=unset hf=/cache"]
+
+
 async def test_trainer_does_not_inherit_suite_secrets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ARGUS_GPU_BROKER_TOKEN", "s3cret")
     monkeypatch.setenv("FORGE_TEST_VISIBLE", "yes")

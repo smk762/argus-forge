@@ -136,12 +136,19 @@ async def lease_training(
             sampler = asyncio.create_task(_sample_peak(lease, device, baseline, sample_s or PEAK_SAMPLE_S))
         yield lease
     except BaseException as exc:
-        await _stop(sampler)
-        if not await cm.__aexit__(type(exc), exc, exc.__traceback__):
+        # The lease is released whatever stopping the sampler does: a skipped
+        # __aexit__ would hold a non-preemptible whole-card lease indefinitely.
+        try:
+            await _stop(sampler)
+        finally:
+            suppressed = await cm.__aexit__(type(exc), exc, exc.__traceback__)
+        if not suppressed:
             raise
     else:
-        await _stop(sampler)
-        await cm.__aexit__(None, None, None)
+        try:
+            await _stop(sampler)
+        finally:
+            await cm.__aexit__(None, None, None)
 
 
 async def _stop(task: asyncio.Task[None] | None) -> None:

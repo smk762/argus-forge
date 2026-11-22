@@ -19,6 +19,16 @@ def map_path(path: Path | str, path_map: dict[str, str]) -> str:
     :func:`argus_forge.core.resolve_path_map`); a prefix only matches at a
     path-component boundary, so ``/data/out`` never rewrites ``/data/output``.
     """
+    return map_path_matched(path, path_map)[0]
+
+
+def map_path_matched(path: Path | str, path_map: dict[str, str]) -> tuple[str, bool]:
+    """:func:`map_path`, plus whether a prefix matched.
+
+    A match can leave the string unchanged (an identity entry such as
+    ``/data -> /data``, for a mount shared by container and host), so callers
+    counting remaps use the flag, not ``out != path``.
+    """
     s = str(path)
     for src in sorted(path_map, key=len, reverse=True):
         if not src:
@@ -27,12 +37,12 @@ def map_path(path: Path | str, path_map: dict[str, str]) -> str:
         # root "/", which must match every absolute path, not only ones starting "//".
         prefix = src.rstrip("/")
         if s in (src, prefix):
-            return path_map[src]
+            return path_map[src], True
         if s.startswith(prefix + "/"):
             # Strip the target's trailing slash too ("/" becomes ""), or "/mnt/x/" + "/a" doubles it.
             mapped = path_map[src].rstrip("/") + s[len(prefix) :]
-            return mapped or "/"
-    return s
+            return mapped or "/", True
+    return s, False
 
 
 @dataclass
@@ -56,7 +66,7 @@ class EmitContext:
     # (container path -> host path), longest prefix wins. Keys/values arrive
     # normalized from core.resolve_path_map. See ForgeRequest.path_map.
     path_map: dict[str, str] = field(default_factory=dict)
-    # How many mapped() calls actually rewrote a path — path_note() uses this
+    # How many mapped() calls matched a path_map prefix — path_note() uses this
     # to avoid claiming a remap happened when no prefix ever matched.
     map_hits: int = field(default=0, init=False)
 
@@ -78,8 +88,8 @@ class EmitContext:
         Configs are often forged inside a container but run on the host; this
         is where ``/data/out/...`` becomes ``/home/you/argus/out/...``.
         """
-        out = map_path(path, self.path_map)
-        if out != str(path):
+        out, matched = map_path_matched(path, self.path_map)
+        if matched:
             self.map_hits += 1
         return out
 

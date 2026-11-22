@@ -14,7 +14,7 @@ from pathlib import Path
 import structlog
 
 from argus_forge.emitters import EMITTERS, EmitContext
-from argus_forge.emitters.base import map_path
+from argus_forge.emitters.base import map_path_matched
 from argus_forge.heuristics import apply_overrides
 from argus_forge.manifest import (
     FORGE_DIR_NAME,
@@ -253,9 +253,9 @@ def forge_config(req: ForgeRequest, *, caption_source_root: str | None = None) -
 
     # A checkpoint from the manifest is a container path like everything else;
     # HF repo ids ("stabilityai/...") are not absolute and are left alone.
-    base_model_mapped = base_model.startswith("/") and map_path(base_model, path_map) != base_model
-    if base_model_mapped:
-        base_model = map_path(base_model, path_map)
+    base_model_mapped = False
+    if base_model.startswith("/"):
+        base_model, base_model_mapped = map_path_matched(base_model, path_map)
 
     trigger = req.trigger or slugify(export_dir.name)
     output_name = req.output_name or f"{slugify(export_dir.name)}-lora"

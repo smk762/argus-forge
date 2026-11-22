@@ -316,18 +316,34 @@ def trainers() -> None:
         typer.echo(f"{'':12s}   {info.notes}")
 
 
-DEFAULT_SCHEMA_PATH = Path("schema/forge-wire.schema.json")
+SCHEMA_REL_PATH = Path("schema/forge-wire.schema.json")
+
+
+def default_schema_path() -> Path:
+    """The committed wire schema of the checkout this module runs from, whatever the cwd.
+
+    The schema is not package data: it lives at the repo root, two levels above
+    ``src/argus_forge/``. Without a ``schema/`` dir there (an installed wheel),
+    it falls back to ``schema/forge-wire.schema.json`` under the cwd.
+    """
+    repo_schema = Path(__file__).resolve().parents[2] / SCHEMA_REL_PATH
+    return repo_schema if repo_schema.parent.is_dir() else SCHEMA_REL_PATH
 
 
 @app.command()
 def schema(
-    output: Path = Option(DEFAULT_SCHEMA_PATH, "--output", "-o", help="Where to write the JSON Schema"),
+    output: Path | None = Option(
+        None, "--output", "-o", help=f"Where to write the JSON Schema [default: the checkout's {SCHEMA_REL_PATH}]"
+    ),
     check: bool = Option(False, "--check", help="Exit non-zero if the committed schema is stale (for CI)"),
 ) -> None:
     """Emit the wire-contract JSON Schema consumers codegen against."""
     import json
 
     from argus_forge.models import wire_schema
+
+    if output is None:
+        output = default_schema_path()
 
     rendered = json.dumps(wire_schema(), indent=2, sort_keys=True) + "\n"
 

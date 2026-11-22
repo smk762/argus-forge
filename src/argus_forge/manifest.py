@@ -33,6 +33,8 @@ from argus_forge.models import (
 logger = structlog.get_logger()
 
 MANIFEST_NAME = "manifest.jsonl"
+# curator's speech export manifest (argus_forge.speech owns reading it).
+SPEECH_MANIFEST_NAME = "speech_manifest.jsonl"
 
 # Forge writes its output under <export_dir>/forge/<trainer>/; anything below
 # that must not count as dataset content.
@@ -201,6 +203,13 @@ def scan_export(
         raise ForgeError(f"not a directory: {export_dir}")
 
     manifest_file = export_dir / MANIFEST_NAME
+    if not manifest_file.is_file() and (export_dir / SPEECH_MANIFEST_NAME).is_file():
+        # A speech export has no image manifest: read as a bare image folder it
+        # would train on nothing and report "empty" instead of saying why.
+        raise ForgeError(
+            f"{export_dir} is a curator speech export ({SPEECH_MANIFEST_NAME}): the image trainers can't train "
+            "on it; read it with argus_forge.speech.read_speech_export"
+        )
     rows = read_manifest(manifest_file) if manifest_file.is_file() else []
 
     images = find_images(export_dir)

@@ -869,7 +869,7 @@
       "type": "object"
     },
     "TargetProfile": {
-      "description": "What a dataset was curated for \u2014 shared verbatim across the suite.\n\nInherited unchanged from stage to stage (curator \u2192 lens \u2192 forge \u2192 proof) so\na decision made once at curation time is honoured everywhere downstream; no\nstage remaps the taxonomy.",
+      "description": "What a dataset was curated for \u2014 shared verbatim across the suite.\n\nInherited unchanged from stage to stage (curator \u2192 lens \u2192 forge \u2192 proof) so\na decision made once at curation time is honoured everywhere downstream; no\nstage remaps the taxonomy.\n\n``modality`` defaults to ``image``, so a profile without it reads exactly as\nbefore. A ``speech`` profile pairs with a :data:`SpeechCategory` (default\n``voice``) and an image profile with a :data:`TargetCategory`; a mismatch is\nrefused. For speech, ``target_backend`` names a TTS model family\n(``qwen3-tts``, ``xtts-v2``) and defaults to ``None`` rather than ``sdxl``,\nand ``target_style`` is ignored. Per-clip language and accent labels belong\nin the stage's manifest rows, not here.",
       "properties": {
         "checkpoint": {
           "anyOf": [
@@ -882,6 +882,15 @@
           ],
           "default": null,
           "title": "Checkpoint"
+        },
+        "modality": {
+          "default": "image",
+          "enum": [
+            "image",
+            "speech"
+          ],
+          "title": "Modality",
+          "type": "string"
         },
         "target_backend": {
           "anyOf": [
@@ -896,16 +905,29 @@
           "title": "Target Backend"
         },
         "target_category": {
-          "default": "identity",
-          "enum": [
-            "identity",
-            "wardrobe",
-            "pose_composition",
-            "setting",
-            "concept"
+          "anyOf": [
+            {
+              "enum": [
+                "identity",
+                "wardrobe",
+                "pose_composition",
+                "setting",
+                "concept"
+              ],
+              "type": "string"
+            },
+            {
+              "enum": [
+                "voice",
+                "accent",
+                "language",
+                "speaking_style"
+              ],
+              "type": "string"
+            }
           ],
-          "title": "Target Category",
-          "type": "string"
+          "default": "identity",
+          "title": "Target Category"
         },
         "target_style": {
           "default": "photo",

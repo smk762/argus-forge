@@ -146,6 +146,25 @@ driven from its own UI) and streams the trainer's output. It exits with the
 trainer's own exit code, so it slots into scripts and CI; `--dry-run` prints the
 command without executing, and `--json` streams raw NDJSON `RunEvent`s.
 
+### Speech exports
+
+A curator speech export (argus-curator#187) holds WAV/FLAC clips, a `<stem>.txt` transcript beside each, and
+`speech_manifest.jsonl` (`SpeechManifestRow`, versioned by `speech_manifest_version`, independent of the image
+`manifest_version`). Forge reads 1.x and refuses any other major by name. `inspect` detects one by that file:
+
+```bash
+argus-forge inspect /data/voice-train --held-out /data/voice-held   # clips, hours, speakers, sources
+```
+
+Each clip is joined from curator's `exported_path` / `transcript_path` onto the export dir as forge sees it
+(never re-derived from `rel_path`); curator's `exported_abs_path` is carried, and refused if it names a
+different file forge can see. Rows with `split` `train` (or null) are trained on; `held_out` rows, and every row
+of a `--held-out` export, are reference clips only. A held-out `speaker_id`, `speaker_label` or `speaker_cluster`
+that also appears in training is refused. Speaker, accent, language and gender are carried per clip, and corpus,
+licence and provenance per source. An edited `.txt` wins over the manifest's `transcript`. The result,
+`argus_forge.speech.read_speech_export` -> `SpeechDataset`, is what a speech emitter (`SpeechEmitter`) takes.
+No speech emitter ships yet: XTTS-v2 is #56. The image trainers refuse a speech export.
+
 `--category` overrides the manifest's target category. The values are argus-cortex's shared taxonomy
 (`identity`, `wardrobe`, `pose_composition`, `setting`, `concept`), and each one sets its own step budget,
 network size and dataset-size guidance.

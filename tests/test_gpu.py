@@ -178,6 +178,24 @@ async def test_peak_vram_is_the_drop_below_the_launch_baseline(monkeypatch: pyte
     assert lease.peak_vram_mb == 11000
 
 
+async def _raising_stop(_task: asyncio.Task[None] | None) -> None:
+    raise RuntimeError("sampler stop failed")
+
+
+async def test_lease_is_released_when_stopping_the_sampler_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failing sampler stop must not skip the release, on a clean body or a failing one."""
+    monkeypatch.setattr(gpu, "_stop", _raising_stop)
+    clean = _Recording()
+    with pytest.raises(RuntimeError, match="sampler stop failed"):
+        async with gpu.lease_training(clean, "r"):
+            pass
+    failing = _Recording()
+    with pytest.raises(RuntimeError, match="sampler stop failed"):
+        async with gpu.lease_training(failing, "r"):
+            raise ValueError("body failed")
+    assert (clean.exits, failing.exits) == ([None], [ValueError])
+
+
 def _broker(log: list[tuple[str, dict]], *, lease_route: bool = True) -> BrokerCoordinator:
     def handle(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content) if request.content else {}

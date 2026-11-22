@@ -646,8 +646,18 @@ WIRE_MODELS: tuple[type[BaseModel], ...] = (
 )
 
 
+WIRE_TITLE = "argus-forge wire contract"
+
+
 def wire_schema() -> dict:
     """Combined JSON Schema for forge's wire contract (all WIRE_MODELS), via argus-cortex's suite-wide builder."""
     from argus_cortex.wire import wire_schema as build
 
-    return build(WIRE_MODELS, title="argus-forge wire contract")
+    return build(WIRE_MODELS, title=WIRE_TITLE)
+
+
+def render_wire_schema() -> str:
+    """The committed ``schema/forge-wire.schema.json`` text, formatted by argus-cortex (``schema`` writes it)."""
+    from argus_cortex.wire import render_schema
+
+    return render_schema(WIRE_MODELS, title=WIRE_TITLE)

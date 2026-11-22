@@ -49,9 +49,17 @@ SECRET_ENV_KEYS: frozenset[str] = frozenset({"ARGUS_GPU_BROKER_TOKEN", "ARGUS_AD
 
 
 def child_env(req: RunRequest) -> dict[str, str]:
-    """The trainer's environment: the server's own, less :data:`SECRET_ENV_KEYS`, plus the request's allowed keys."""
+    """The trainer's environment: the server's own, less :data:`SECRET_ENV_KEYS`, plus the request's allowed keys.
+
+    The allow-list is enforced here as well as in :func:`prepare_run`, because a
+    caller that passes ``resolved=`` to :func:`astream_run` skips that check: a
+    request key outside :data:`RUN_ENV_KEYS` never reaches the trainer.
+    """
     base = {k: v for k, v in os.environ.items() if k not in SECRET_ENV_KEYS}
-    return {**base, **req.env}
+    dropped = sorted(k for k in req.env if k not in RUN_ENV_KEYS)
+    if dropped:
+        logger.warning("run_env_keys_dropped", keys=dropped)
+    return {**base, **{k: v for k, v in req.env.items() if k in RUN_ENV_KEYS}}
 
 
 # Bytes read per stdout pull. Reading in chunks (not readline) means no single

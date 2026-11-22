@@ -48,6 +48,7 @@ def test_without_the_header_every_post_starts_a_run(tmp_path: Path) -> None:
     export = forge_stub(tmp_path, "kohya", "exit 0\n")
     with TestClient(create_app(export_root=str(tmp_path))) as client:
         first = client.post("/run", json=_body(export))
+        _wait(client, first.json()["run_id"])  # one run at a time (test_one_active_run)
         second = client.post("/run", json=_body(export))
         assert first.status_code == second.status_code == 202
         assert first.json()["run_id"] != second.json()["run_id"]

@@ -34,6 +34,17 @@ same key with the same body returns the run the first request started (with
 ``Idempotent-Replayed: true``), the same key with a different body is a 409, and
 no second run starts either way (see :mod:`argus_forge.server.idempotency`).
 
+One run at a time: while a run is active — queued for its GPU lease or running
+(:func:`argus_forge.models.run_is_active`) — another ``POST /run`` is a 409
+:class:`~argus_forge.models.RunActiveError` (``code: run_active``, naming the
+active run) and creates nothing, so two clients (two studio tabs) cannot start
+two runs. The check and the creation are one critical section across every
+request, keyed or not. A replay of a key's own run is answered before the check,
+so a client retrying its own request is never refused because of its own run. A
+dry run is exempt (it takes no lease and starts no process).
+``ARGUS_FORGE_MAX_ACTIVE_RUNS`` raises the limit for a host whose GPU broker can
+place several runs at once.
+
 ``POST /run`` shells out to a script forge generated (see
 :mod:`argus_forge.runner`) on a background job that outlives the request (see
 :mod:`argus_forge.server.jobs`): it returns the run's id immediately, and progress is
@@ -60,10 +71,12 @@ from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import structlog
+
 try:
     from argus_cortex.server import FALSY, TRUTHY, WriteGuard, cross_site_refuse, env_flag
     from fastapi import Depends, FastAPI, Header, HTTPException, Response
-    from fastapi.responses import StreamingResponse
+    from fastapi.responses import JSONResponse, StreamingResponse
     from starlette.datastructures import Headers
     from starlette.types import Scope
 except ImportError as exc:  # pragma: no cover
@@ -77,14 +90,17 @@ from argus_forge.models import (
     ARGUS_ROOT_ENV,
     CORS_ORIGINS_ENV,
     LEGACY_ROOT_ENV,
+    MAX_ACTIVE_RUNS_ENV,
     READONLY_ENV,
     STATE_DIR_ENV,
     TRUSTED_HOSTS_ENV,
+    ActiveRun,
     DatasetInfo,
     ForgeError,
     ForgeRequest,
     ForgeResult,
     InspectRequest,
+    RunActiveError,
     RunArtifact,
     RunEvent,
     RunRequest,
@@ -103,6 +119,8 @@ from argus_forge.server.idempotency import (
     valid_key,
 )
 from argus_forge.server.jobs import Job, JobRegistry
+
+logger = structlog.get_logger()
 
 # Browser origins allowed by a bare --cors: the argus-studio dev frontend.
 _LOCALHOST_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]
@@ -218,6 +236,58 @@ def env_readonly() -> bool:
     return on
 
 
+DEFAULT_MAX_ACTIVE_RUNS = 1
+
+
+def env_max_active_runs() -> int:
+    """How many runs may be active at once, per ``ARGUS_FORGE_MAX_ACTIVE_RUNS`` (default 1).
+
+    Unset, unparseable or below 1 falls back to the default (with a warning for
+    the latter two): never fatal, like the other deployment knobs, and never
+    looser than the default by accident.
+    """
+    raw = os.environ.get(MAX_ACTIVE_RUNS_ENV, "").strip()
+    if not raw:
+        return DEFAULT_MAX_ACTIVE_RUNS
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        logger.warning("max_active_runs_invalid", env=MAX_ACTIVE_RUNS_ENV, default=DEFAULT_MAX_ACTIVE_RUNS)
+        return DEFAULT_MAX_ACTIVE_RUNS
+    return value
+
+
+class _RunActive(Exception):
+    """Raised inside ``POST /run`` when the active-run limit is reached; answered as a 409 RunActiveError."""
+
+    def __init__(self, blocking: Job, limit: int) -> None:
+        self.blocking = blocking
+        self.limit = limit
+
+
+def _run_active_response(exc: _RunActive) -> JSONResponse:
+    job = exc.blocking
+    if exc.limit == 1:
+        detail = f"a run is already active (run {job.run_id}, {_describe(job)}); wait for it to finish or cancel it"
+    else:
+        detail = (
+            f"{exc.limit} runs are already active, the most this server allows (oldest: run {job.run_id}, "
+            f"{_describe(job)}); wait for one to finish or cancel it"
+        )
+    body = RunActiveError(
+        detail=detail,
+        active_run=ActiveRun(run_id=job.run_id, status=job.status),
+    )
+    return JSONResponse(status_code=409, content=body.model_dump(mode="json"))
+
+
+def _describe(job: Job) -> str:
+    """The run's status for a person: ``running`` covers a run still queued for its GPU lease."""
+    return "queued or running" if job.status == "running" else job.status
+
+
 def _refuse_training(scope: Scope, headers: Headers) -> str | None:
     """Refuse every unsafe method on a ``/run`` route (demo-safe mode).
 
@@ -241,6 +311,7 @@ def create_app(
     trusted_hosts: list[str] | None = None,
     state_dir: str | None = None,
     idempotency_retention_s: float | None = None,
+    max_active_runs: int | None = None,
 ) -> FastAPI:
     """Create the forge FastAPI application.
 
@@ -267,6 +338,10 @@ def create_app(
     kept beside them (``<state_dir>/idempotency``), for *idempotency_retention_s*
     seconds (default ``ARGUS_FORGE_IDEMPOTENCY_RETENTION_S``, else 24 h).
 
+    *max_active_runs* (default ``ARGUS_FORGE_MAX_ACTIVE_RUNS``, else 1) caps the
+    runs active at once — queued for a GPU lease or running; ``POST /run`` past
+    it is a 409 :class:`~argus_forge.models.RunActiveError`.
+
     *trusted_hosts* (default ``FORGE_TRUSTED_HOSTS``) names the hosts this server
     is reached by, so a page it serves itself (``/docs``) can write when it is
     reached by a DNS name; IP literals and ``localhost`` need no entry.
@@ -280,6 +355,13 @@ def create_app(
 
     if allow_run is None:
         allow_run = not env_readonly()
+    run_limit = max_active_runs if max_active_runs is not None else env_max_active_runs()
+    if run_limit < 1:
+        raise ValueError("max_active_runs must be >= 1")
+    # One lock for every POST /run, keyed or not: the active-run check and the
+    # run's creation happen under it, so concurrent requests cannot all see
+    # "nothing active" and each start a run.
+    admission = asyncio.Lock()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -296,6 +378,10 @@ def create_app(
         version=__version__,
         lifespan=lifespan,
     )
+
+    @app.exception_handler(_RunActive)
+    async def run_active_handler(_request: object, exc: _RunActive) -> JSONResponse:
+        return _run_active_response(exc)
 
     raw_origins = cors_origins if cors_origins is not None else (os.environ.get(CORS_ORIGINS_ENV) or "").split(",")
     origins = _dedupe(_normalize_origin(o) for o in raw_origins)
@@ -465,8 +551,10 @@ def create_app(
     RUN_RESPONSES = {
         **TRAINING_DISABLED,
         409: {
-            "description": "the Idempotency-Key was already used with a different request body, "
-            "or the run it started is no longer retained"
+            "model": RunActiveError,
+            "description": "a run is already active (queued for its GPU lease, or running): the body is a "
+            "RunActiveError with code run_active. Or the Idempotency-Key was already used with a different "
+            "request body, or the run it started is no longer retained: a plain {detail} with no code",
         },
         422: {"description": "invalid request body, or an invalid Idempotency-Key header"},
     }
@@ -492,14 +580,24 @@ def create_app(
                 command, cwd = prepare_run(fenced)
                 return fenced, command, cwd
 
-            # Validate (off the event loop) up front so a missing/invalid config is a
-            # 400. The run then executes on a background job that outlives this
-            # request; the caller gets its id back and watches via GET /run/{id}/stream.
-            try:
-                fenced, command, cwd = await asyncio.to_thread(work)
-            except ForgeError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return registry.start(fenced, command, cwd)
+            # One critical section across every request: check, validate, create.
+            # The check comes first, so a request that would be refused touches
+            # nothing on disk; it holds across the validation's await, which is
+            # exactly the window two concurrent requests would otherwise both
+            # pass the check in.
+            async with admission:
+                if not req.dry_run:  # a dry run takes no lease and starts no process
+                    active = registry.active_runs()
+                    if len(active) >= run_limit:
+                        raise _RunActive(active[0], run_limit)
+                # Validate (off the event loop) so a missing/invalid config is a
+                # 400. The run then executes on a background job that outlives this
+                # request; the caller gets its id back and watches via GET /run/{id}/stream.
+                try:
+                    fenced, command, cwd = await asyncio.to_thread(work)
+                except ForgeError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                return registry.start(fenced, command, cwd)
 
         if idempotency_key is None:
             return (await start()).state()
@@ -511,11 +609,15 @@ def create_app(
 
         def active(run_id: str) -> bool:
             job = registry.get(run_id)
-            return job is not None and not job.finished
+            return job is not None and job.active
 
         await idempotency.prune(active)
         # Check-and-create under the key's lock, so concurrent requests with one
-        # new key start exactly one run between them.
+        # new key start exactly one run between them. The replay and key-clash
+        # answers come before start()'s active-run check: a client retrying its
+        # own request gets its own run back, never a 409 about it. A request the
+        # active-run check refuses raises out of start() before the key is
+        # recorded, so the same key starts a run once nothing is active.
         async with idempotency.hold(khash):
             record = idempotency.get(khash)
             if record is not None and idempotency.expired(record) and not active(record.run_id):

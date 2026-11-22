@@ -42,7 +42,7 @@ import structlog
 from pydantic import ValidationError
 
 from argus_forge.manifest import resolve_export_dir
-from argus_forge.models import ForgeError, RunArtifact, RunEvent, RunRequest, RunState, RunStatus
+from argus_forge.models import ForgeError, RunArtifact, RunEvent, RunRequest, RunState, RunStatus, run_is_active
 from argus_forge.runner import astream_run, lora_artifact, new_run_id
 
 logger = structlog.get_logger()
@@ -228,6 +228,25 @@ class Job:
     @property
     def finished(self) -> bool:
         return self._done.is_set()
+
+    @property
+    def active(self) -> bool:
+        """Still queued for its GPU lease or running (:func:`~argus_forge.models.run_is_active`).
+
+        A cancel still unwinding (the trainer inside its SIGTERM grace) is active
+        too: the status turns terminal only once the task has really ended.
+        """
+        return run_is_active(self.status)
+
+    @property
+    def holds_a_slot(self) -> bool:
+        """Whether this run counts against the one-active-run rule (``POST /run``).
+
+        An active run that is not a dry run: a dry run takes no GPU lease and
+        starts no process (it ends straight after its ``start`` event), so it
+        neither blocks a real run nor is blocked by one.
+        """
+        return self.active and not self.req.dry_run
 
     def state(self) -> RunState:
         return RunState(
@@ -466,6 +485,15 @@ class JobRegistry:
 
     def list(self) -> list[Job]:
         return list(self._jobs.values())
+
+    def active_runs(self) -> list[Job]:
+        """Runs that count against the one-active-run rule (see :attr:`Job.holds_a_slot`), oldest first.
+
+        Never one restored from disk: a run that was in flight when forge went
+        away is restored ``failed`` (:meth:`Job.restore`), so a stale record
+        cannot block new runs after a restart.
+        """
+        return sorted((job for job in self._jobs.values() if job.holds_a_slot), key=lambda job: job.started_at)
 
     async def shutdown(self) -> None:
         """Cancel every in-flight run (server stopping) so no trainer is left

@@ -107,6 +107,9 @@ STATE_DIR_ENV = "ARGUS_FORGE_STATE_DIR"
 # Seconds a POST /run Idempotency-Key is remembered (default 24 h); a key whose
 # run is still active is kept regardless. See argus_forge.server.idempotency.
 IDEMPOTENCY_RETENTION_ENV = "ARGUS_FORGE_IDEMPOTENCY_RETENTION_S"
+# How many runs may be active (queued for a GPU lease, or running) at once;
+# default 1, so a second POST /run is a 409 while one is active.
+MAX_ACTIVE_RUNS_ENV = "ARGUS_FORGE_MAX_ACTIVE_RUNS"
 
 # Every env var the server reads. Tests clear these so a value exported in a
 # developer's shell cannot decide whether the security tests pass.
@@ -119,6 +122,7 @@ SERVER_ENV_VARS: tuple[str, ...] = (
     TRUSTED_HOSTS_ENV,
     STATE_DIR_ENV,
     IDEMPOTENCY_RETENTION_ENV,
+    MAX_ACTIVE_RUNS_ENV,
 )
 
 
@@ -521,6 +525,19 @@ class RunEvent(BaseModel):
 
 RunStatus = Literal["running", "succeeded", "failed", "cancelled"]
 
+# The one place forge decides whether a run is still active. A run is
+# ``running`` from the moment POST /run creates it until it ends, which
+# includes the time it waits (queued) for its argus-iris ``train`` lease, so a
+# queued run is active exactly like one whose trainer is going. Every other
+# status is terminal. ``test_jobs`` checks the two sets partition ``RunStatus``.
+ACTIVE_RUN_STATUSES: frozenset[RunStatus] = frozenset({"running"})
+TERMINAL_RUN_STATUSES: frozenset[RunStatus] = frozenset({"succeeded", "failed", "cancelled"})
+
+
+def run_is_active(status: str) -> bool:
+    """Whether a run in *status* is still active (queued for its GPU lease, or running)."""
+    return status in ACTIVE_RUN_STATUSES
+
 
 class RunArtifact(BaseModel):
     """The LoRA a succeeded run left behind (``RunState.lora``, GET /run/{id}/lora).
@@ -567,6 +584,31 @@ class RunState(BaseModel):
     lora: RunArtifact | None = None
 
 
+# The machine-readable ``code`` on POST /run's one-active-run 409, so a client
+# can tell it from the Idempotency-Key 409s (which carry no code).
+RUN_ACTIVE_CODE = "run_active"
+
+
+class ActiveRun(BaseModel):
+    """The run that blocks a new one (``RunActiveError.active_run``)."""
+
+    run_id: str
+    status: RunStatus
+
+
+class RunActiveError(BaseModel):
+    """POST /run's 409 body when a run is already active (queued for its GPU lease, or running).
+
+    ``detail`` is the human-readable message, a string like every other forge
+    error; ``code`` is always ``run_active``. The Idempotency-Key 409s are plain
+    ``{"detail": ...}`` with no ``code``.
+    """
+
+    detail: str
+    code: Literal["run_active"] = RUN_ACTIVE_CODE
+    active_run: ActiveRun
+
+
 class TrainerInfo(BaseModel):
     """Catalogue entry for GET /trainers."""
 
@@ -598,6 +640,8 @@ WIRE_MODELS: tuple[type[BaseModel], ...] = (
     RunEvent,
     RunArtifact,
     RunState,
+    ActiveRun,
+    RunActiveError,
     TrainerInfo,
 )
 

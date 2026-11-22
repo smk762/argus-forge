@@ -12,6 +12,7 @@ script plus flags. Forge emits:
 from __future__ import annotations
 
 import json
+import re
 import shlex
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from argus_forge.models import ForgeError, GeneratedFile
 # (StableDiffusionXLPipeline.save_lora_weights' default weight_name).
 LORA_FILENAME = "pytorch_lora_weights.safetensors"
 _OUTPUT_FLAG = "--output_dir="
+_CONTINUATION = re.compile(r"\\\r?\n")
 
 
 def lora_file(out_dir: Path) -> Path:
@@ -37,7 +39,9 @@ def lora_file(out_dir: Path) -> Path:
     except (OSError, UnicodeDecodeError) as exc:
         raise ForgeError(f"cannot read {script}: {exc}") from exc
     found: str | None = None
-    for line in text.splitlines():
+    # Join backslash-continued lines first: the launch command spans many of
+    # them, and shlex refuses a line ending in a lone backslash.
+    for line in _CONTINUATION.sub(" ", text).splitlines():
         try:
             words = shlex.split(line, comments=True)
         except ValueError:

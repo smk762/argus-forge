@@ -6,7 +6,8 @@ Routes:
     GET  /trainers         -> list[TrainerInfo]
     POST /inspect          -> DatasetInfo    (read-only look at an export dir)
     POST /config           -> ForgeResult    (render configs; dry_run for preview)
-    POST /run              -> RunState        (start a background run, return its id)
+    POST /run              -> RunState        (start a background run, return its id;
+                                               an Idempotency-Key header makes a retry safe)
     GET  /runs             -> list[RunState]  (registry of tracked runs)
     GET  /run/{id}         -> RunState        (status; poll for terminal result)
     GET  /run/{id}/lora    -> RunArtifact     (a succeeded run's LoRA: path, sha256, size)
@@ -27,6 +28,11 @@ spelling, because :func:`argus_forge.manifest.resolve_export_dir` owns that
 policy ("absolute but NOT symlink-resolved") and ``path_map`` prefixes are
 matched against it. Manifest ``abs_path`` caption sources are fenced too — see
 ``caption_source_root`` on :class:`~argus_forge.models.ForgeRequest`.
+
+A ``POST /run`` carrying an ``Idempotency-Key`` header is safe to retry: the
+same key with the same body returns the run the first request started (with
+``Idempotent-Replayed: true``), the same key with a different body is a 409, and
+no second run starts either way (see :mod:`argus_forge.server.idempotency`).
 
 ``POST /run`` shells out to a script forge generated (see
 :mod:`argus_forge.runner`) on a background job that outlives the request (see
@@ -56,7 +62,7 @@ from pathlib import Path
 
 try:
     from argus_cortex.server import FALSY, TRUTHY, WriteGuard, cross_site_refuse, env_flag
-    from fastapi import Depends, FastAPI, HTTPException
+    from fastapi import Depends, FastAPI, Header, HTTPException, Response
     from fastapi.responses import StreamingResponse
     from starlette.datastructures import Headers
     from starlette.types import Scope
@@ -86,6 +92,16 @@ from argus_forge.models import (
     TrainerInfo,
 )
 from argus_forge.runner import prepare_run
+from argus_forge.server.idempotency import (
+    IDEMPOTENCY_KEY_HEADER,
+    INVALID_KEY_DETAIL,
+    REPLAYED_HEADER,
+    IdempotencyStore,
+    env_retention_s,
+    key_hash,
+    request_fingerprint,
+    valid_key,
+)
 from argus_forge.server.jobs import Job, JobRegistry
 
 # Browser origins allowed by a bare --cors: the argus-studio dev frontend.
@@ -224,6 +240,7 @@ def create_app(
     allow_run: bool | None = None,
     trusted_hosts: list[str] | None = None,
     state_dir: str | None = None,
+    idempotency_retention_s: float | None = None,
 ) -> FastAPI:
     """Create the forge FastAPI application.
 
@@ -246,7 +263,9 @@ def create_app(
 
     *state_dir* (default ``ARGUS_FORGE_STATE_DIR``) keeps run records on disk so
     a restart doesn't forget them (see :class:`~argus_forge.server.jobs.RunStore`);
-    unset, runs live in memory only.
+    unset, runs live in memory only. ``POST /run`` ``Idempotency-Key`` records are
+    kept beside them (``<state_dir>/idempotency``), for *idempotency_retention_s*
+    seconds (default ``ARGUS_FORGE_IDEMPOTENCY_RETENTION_S``, else 24 h).
 
     *trusted_hosts* (default ``FORGE_TRUSTED_HOSTS``) names the hosts this server
     is reached by, so a page it serves itself (``/docs``) can write when it is
@@ -254,6 +273,10 @@ def create_app(
     """
     raw_state = state_dir or os.environ.get(STATE_DIR_ENV) or None
     registry = JobRegistry(Path(raw_state) if raw_state else None)
+    idempotency = IdempotencyStore(
+        Path(raw_state) if raw_state else None,
+        retention_s=idempotency_retention_s if idempotency_retention_s is not None else env_retention_s(),
+    )
 
     if allow_run is None:
         allow_run = not env_readonly()
@@ -317,7 +340,8 @@ def create_app(
             allow_headers=["*"],
             # Non-simple headers are hidden from cross-origin JS unless exposed;
             # the run-id join key rides here on GET /run/{id}/stream.
-            expose_headers=["X-Training-Run-Id"],
+            # Idempotent-Replayed tells a retrying POST /run it got an earlier run back.
+            expose_headers=["X-Training-Run-Id", REPLAYED_HEADER],
         )
 
     raw_root = export_root or os.environ.get(ARGUS_ROOT_ENV) or os.environ.get(LEGACY_ROOT_ENV)
@@ -438,23 +462,85 @@ def create_app(
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"forge failed: {exc}") from exc
 
-    @app.post("/run", response_model=RunState, status_code=202, responses=TRAINING_DISABLED)
-    async def run(req: RunRequest) -> RunState:
+    RUN_RESPONSES = {
+        **TRAINING_DISABLED,
+        409: {
+            "description": "the Idempotency-Key was already used with a different request body, "
+            "or the run it started is no longer retained"
+        },
+        422: {"description": "invalid request body, or an invalid Idempotency-Key header"},
+    }
+
+    @app.post("/run", response_model=RunState, status_code=202, responses=RUN_RESPONSES)
+    async def run(
+        req: RunRequest,
+        response: Response,
+        idempotency_key: str | None = Header(
+            default=None,
+            alias=IDEMPOTENCY_KEY_HEADER,
+            description="Optional, 1-200 printable ASCII characters. A retry with the same key and body returns "
+            "the run the first request started (Idempotent-Replayed: true) instead of starting another. "
+            "Keys are global to this server and remembered for ARGUS_FORGE_IDEMPOTENCY_RETENTION_S seconds "
+            "(default 24 h), or for as long as their run is active.",
+        ),
+    ) -> RunState:
         # Demo-safe mode never reaches here: the WriteGuard above refuses every
         # /run route before the body is validated.
-        def work() -> tuple[RunRequest, list[str], str]:
-            fenced = req.model_copy(update={"export_dir": str(_fenced(req.export_dir))})
-            command, cwd = prepare_run(fenced)
-            return fenced, command, cwd
+        async def start() -> Job:
+            def work() -> tuple[RunRequest, list[str], str]:
+                fenced = req.model_copy(update={"export_dir": str(_fenced(req.export_dir))})
+                command, cwd = prepare_run(fenced)
+                return fenced, command, cwd
 
-        # Validate (off the event loop) up front so a missing/invalid config is a
-        # 400. The run then executes on a background job that outlives this
-        # request; the caller gets its id back and watches via GET /run/{id}/stream.
-        try:
-            fenced, command, cwd = await asyncio.to_thread(work)
-        except ForgeError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return registry.start(fenced, command, cwd).state()
+            # Validate (off the event loop) up front so a missing/invalid config is a
+            # 400. The run then executes on a background job that outlives this
+            # request; the caller gets its id back and watches via GET /run/{id}/stream.
+            try:
+                fenced, command, cwd = await asyncio.to_thread(work)
+            except ForgeError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return registry.start(fenced, command, cwd)
+
+        if idempotency_key is None:
+            return (await start()).state()
+
+        if not valid_key(idempotency_key):
+            raise HTTPException(status_code=422, detail=INVALID_KEY_DETAIL)  # never echo the value
+        khash = key_hash(idempotency_key)
+        fingerprint = request_fingerprint(req)
+
+        def active(run_id: str) -> bool:
+            job = registry.get(run_id)
+            return job is not None and not job.finished
+
+        await idempotency.prune(active)
+        # Check-and-create under the key's lock, so concurrent requests with one
+        # new key start exactly one run between them.
+        async with idempotency.hold(khash):
+            record = idempotency.get(khash)
+            if record is not None and idempotency.expired(record) and not active(record.run_id):
+                record = None  # expired but not yet pruned: the key is free again
+            if record is not None:
+                if record.fingerprint != fingerprint:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"this {IDEMPOTENCY_KEY_HEADER} was already used for a different request "
+                        f"(run {record.run_id}); send a new key to start another run",
+                    )
+                job = registry.get(record.run_id)
+                if job is None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"this {IDEMPOTENCY_KEY_HEADER} started run {record.run_id}, "
+                        "which this server no longer retains; send a new key to start another run",
+                    )
+                response.headers[REPLAYED_HEADER] = "true"
+                return job.state()
+            job = await start()
+            record = idempotency.new_record(khash, job.run_id, fingerprint)
+            idempotency.put(record)
+            await asyncio.to_thread(idempotency.save, record)
+            return job.state()
 
     @app.get("/runs", response_model=list[RunState])
     async def runs() -> list[RunState]:

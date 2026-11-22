@@ -104,6 +104,9 @@ TRUSTED_HOSTS_ENV = "FORGE_TRUSTED_HOSTS"
 # Directory the server keeps run records in (one JSON file per run), so a
 # restart doesn't forget them. Unset: runs are kept in memory only.
 STATE_DIR_ENV = "ARGUS_FORGE_STATE_DIR"
+# Seconds a POST /run Idempotency-Key is remembered (default 24 h); a key whose
+# run is still active is kept regardless. See argus_forge.server.idempotency.
+IDEMPOTENCY_RETENTION_ENV = "ARGUS_FORGE_IDEMPOTENCY_RETENTION_S"
 
 # Every env var the server reads. Tests clear these so a value exported in a
 # developer's shell cannot decide whether the security tests pass.
@@ -115,6 +118,7 @@ SERVER_ENV_VARS: tuple[str, ...] = (
     CORS_ORIGINS_ENV,
     TRUSTED_HOSTS_ENV,
     STATE_DIR_ENV,
+    IDEMPOTENCY_RETENTION_ENV,
 )
 
 

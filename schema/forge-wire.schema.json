@@ -1,5 +1,30 @@
 {
   "$defs": {
+    "ActiveRun": {
+      "description": "The run that blocks a new one (``RunActiveError.active_run``).",
+      "properties": {
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "running",
+            "succeeded",
+            "failed",
+            "cancelled"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "status"
+      ],
+      "title": "ActiveRun",
+      "type": "object"
+    },
     "DatasetInfo": {
       "description": "What forge found in an export directory.",
       "properties": {
@@ -581,6 +606,30 @@
         }
       },
       "title": "PoseLabels",
+      "type": "object"
+    },
+    "RunActiveError": {
+      "description": "POST /run's 409 body when a run is already active (queued for its GPU lease, or running).\n\n``detail`` is the human-readable message, a string like every other forge\nerror; ``code`` is always ``run_active``. The Idempotency-Key 409s are plain\n``{\"detail\": ...}`` with no ``code``.",
+      "properties": {
+        "active_run": {
+          "$ref": "#/$defs/ActiveRun"
+        },
+        "code": {
+          "const": "run_active",
+          "default": "run_active",
+          "title": "Code",
+          "type": "string"
+        },
+        "detail": {
+          "title": "Detail",
+          "type": "string"
+        }
+      },
+      "required": [
+        "detail",
+        "active_run"
+      ],
+      "title": "RunActiveError",
       "type": "object"
     },
     "RunArtifact": {

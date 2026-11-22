@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **One active run at a time on `POST /run`.** While a run is active, which means status `running`, including a run
+  still queued for its argus-iris `train` lease, another `POST /run` is a 409 and creates nothing, so two clients
+  (two studio tabs) can no longer start two runs. The body is the new wire model `RunActiveError`:
+  `{"detail": "a run is already active (run <id>, queued or running); wait for it to finish or cancel it",
+  "code": "run_active", "active_run": {"run_id", "status"}}`. `detail` stays a string; `code` tells it apart from
+  the `Idempotency-Key` 409s (no `code`). The check and the creation are one critical section across all
+  requests, so concurrent requests with different keys or none start exactly one run. A replay of the active
+  run's own key still returns it (202, `Idempotent-Replayed: true`); a refused request records no key. A
+  `dry_run` is exempt. A run in flight at a crash is already restored `failed`, so nothing stale blocks after
+  a restart. `ARGUS_FORGE_MAX_ACTIVE_RUNS` (default 1) raises the limit for a multi-GPU broker. Active is
+  defined once (`models.ACTIVE_RUN_STATUSES` / `run_is_active`). `schema/forge-wire.schema.json` gains
+  `ActiveRun` and `RunActiveError`; `schema/forge-parity.json` is unchanged.
+
 - **`Idempotency-Key` on `POST /run`.** A retried `POST /run` can no longer start a second training run (a duplicate
   holds the GPU for hours). With the optional header (1-200 printable ASCII characters; anything else is a 422 that
   does not echo it), the same key and the same request body (fingerprinted as the validated `RunRequest`, so JSON

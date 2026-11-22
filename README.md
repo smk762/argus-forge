@@ -237,7 +237,7 @@ argus-forge serve --cors-any --cors-origin https://demo.example --no-run --expor
 | `GET /trainers` | supported trainers + emitted files |
 | `POST /inspect` | look at an export dir (counts, manifest, suggested params) |
 | `POST /config` | render configs; `dry_run: true` returns contents without writing |
-| `POST /run` | start the forged `train.sh` on a background job; returns the run's `RunState` (with `run_id`) — the run outlives the request; an `Idempotency-Key` header makes a retry safe (below) |
+| `POST /run` | start the forged `train.sh` on a background job; returns the run's `RunState` (with `run_id`) — the run outlives the request; 409 while another run is active, and an `Idempotency-Key` header makes a retry safe (below) |
 | `GET /runs` | list tracked runs |
 | `GET /run/{id}` | a run's status (poll for the terminal `status` + `returncode` — the argus-proof join); a succeeded run's `lora` too |
 | `GET /run/{id}/lora` | a succeeded run's LoRA: `path`, `export_path` (relative to the export dir), `sha256`, `size_bytes`; 409 while it hasn't succeeded |
@@ -269,8 +269,8 @@ intended run in the `Idempotency-Key` header (1-200 printable ASCII characters) 
 
 | Request | Response |
 | ------- | -------- |
-| no `Idempotency-Key` | unchanged: every request starts a run (202) |
-| a key not seen before | 202, a new run, remembered under the key |
+| no `Idempotency-Key` | a new run (202), or 409 `run_active` while another run is active (below) |
+| a key not seen before | 202, a new run, remembered under the key; or 409 `run_active` while another run is active, remembering nothing |
 | the same key and the same body | 202 with the run the key started, as it is now (running, succeeded, failed or cancelled), and `Idempotent-Replayed: true`; nothing new starts |
 | the same key, a different body | 409; nothing new starts |
 | the same key, but its run is no longer retained (past the newest 64 finished runs) | 409; nothing new starts |
@@ -284,6 +284,37 @@ the key's sha256, never the key, and written atomically) so a replay after a res
 without a state directory they are in memory only. A key is remembered for
 `ARGUS_FORGE_IDEMPOTENCY_RETENTION_S` seconds (default 86400, 24 h), pruned lazily on the next keyed `POST /run`
 after that, and never while its run is still going. `Idempotent-Replayed` is exposed to browsers under CORS.
+
+**One run at a time.** While a run is **active**, another `POST /run` is refused with 409 and creates nothing,
+so two clients (two studio tabs, a script and a tab) cannot start two runs that then fight over the GPU. Active
+means not yet ended: status `running`, which covers a run still **queued** for its argus-iris `train` lease as
+well as one whose trainer is going (a queued run counts, or the broker's queue fills with forge's own runs).
+`succeeded`, `failed` and `cancelled` are terminal. The 409 body is a `RunActiveError`:
+
+```json
+{
+  "detail": "a run is already active (run 3f2a…, queued or running); wait for it to finish or cancel it",
+  "code": "run_active",
+  "active_run": {"run_id": "3f2a…", "status": "running"}
+}
+```
+
+`detail` is a string like every other forge error, so existing clients still read it; `code: "run_active"` is
+the machine-readable marker that tells this 409 apart from the `Idempotency-Key` 409s, which are a plain
+`{"detail": ...}` with no `code`. Nothing from the request is echoed. Wait for the active run (poll
+`GET /run/{id}` or attach to its stream) or cancel it (`POST /run/{id}/cancel`), then start yours.
+
+With an `Idempotency-Key`, the key is looked at first: a retry of the active run's own request (same key, same
+body) still gets its run back (202, `Idempotent-Replayed: true`), never a 409 about itself, and the same key with
+a different body is still the key's 409. A request refused because a run is active records no key, so the same
+request with the same key starts a run once nothing is active. The check and the creation are one critical
+section across every request, keyed or not, so concurrent requests start exactly one run.
+
+A `dry_run` is exempt both ways: it takes no GPU lease and starts no process, so it neither waits for nor blocks a
+real run. After a restart nothing stale blocks: a run that was in flight when forge went away is restored
+`failed` (or saved `cancelled` by a graceful stop), so it is not active. A host whose GPU broker can place several
+runs at once (several GPUs behind argus-iris) can raise the limit with `ARGUS_FORGE_MAX_ACTIVE_RUNS` (default 1;
+an unparseable or sub-1 value falls back to 1); the 409 then names the oldest active run.
 
 > The local CLI `argus-forge run` streams live in your terminal and is independent of the server registry.
 

@@ -128,6 +128,14 @@ def test_run_exit_status_mapping() -> None:
     assert _run_exit_status(0, True) == 1  # error seen -> never report success
 
 
+def test_schema_default_is_the_checkouts_file_from_any_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`argus-forge schema --check` finds the committed schema when run outside the repo root."""
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["schema", "--check"])
+    assert result.exit_code == 0, result.output
+    assert not (tmp_path / "schema").exists()
+
+
 def test_schema_write_and_check(tmp_path: Path) -> None:
     out = tmp_path / "schema.json"
     assert runner.invoke(app, ["schema", "--output", str(out)]).exit_code == 0

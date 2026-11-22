@@ -237,7 +237,7 @@ argus-forge serve --cors-any --cors-origin https://demo.example --no-run --expor
 | `GET /trainers` | supported trainers + emitted files |
 | `POST /inspect` | look at an export dir (counts, manifest, suggested params) |
 | `POST /config` | render configs; `dry_run: true` returns contents without writing |
-| `POST /run` | start the forged `train.sh` on a background job; returns the run's `RunState` (with `run_id`) — the run outlives the request |
+| `POST /run` | start the forged `train.sh` on a background job; returns the run's `RunState` (with `run_id`) — the run outlives the request; an `Idempotency-Key` header makes a retry safe (below) |
 | `GET /runs` | list tracked runs |
 | `GET /run/{id}` | a run's status (poll for the terminal `status` + `returncode` — the argus-proof join); a succeeded run's `lora` too |
 | `GET /run/{id}/lora` | a succeeded run's LoRA: `path`, `export_path` (relative to the export dir), `sha256`, `size_bytes`; 409 while it hasn't succeeded |
@@ -262,6 +262,28 @@ there as JSON when it starts and when it ends, and reloaded at startup, the newe
 The event log isn't saved: a restored run's stream replays its `start` and its terminal event. A run that
 was still `running` when forge went away comes back `failed`, with a message saying its outcome is unknown.
 Without a state directory, runs are kept in memory only.
+
+**Retrying `POST /run` is safe with an `Idempotency-Key`.** A dropped connection can leave a client unsure
+whether its run started, and a duplicate run holds the GPU for hours. Send a fresh random key (a UUID) per
+intended run in the `Idempotency-Key` header (1-200 printable ASCII characters) and retry with the same key:
+
+| Request | Response |
+| ------- | -------- |
+| no `Idempotency-Key` | unchanged: every request starts a run (202) |
+| a key not seen before | 202, a new run, remembered under the key |
+| the same key and the same body | 202 with the run the key started, as it is now (running, succeeded, failed or cancelled), and `Idempotent-Replayed: true`; nothing new starts |
+| the same key, a different body | 409; nothing new starts |
+| the same key, but its run is no longer retained (past the newest 64 finished runs) | 409; nothing new starts |
+| a malformed key | 422 (the value is not echoed) |
+
+"The same body" compares the validated request (sorted keys), so whitespace and key order don't matter, but
+`dry_run`, `env` or a different `export_dir` do. A request refused with a 400 records nothing, so its retry is
+judged afresh. Keys are **global to the server**: forge has no user identity, so two clients that send the same
+key share it. They are kept beside the run records (`<state-dir>/idempotency/`, one JSON file per key holding
+the key's sha256, never the key, and written atomically) so a replay after a restart still finds its run;
+without a state directory they are in memory only. A key is remembered for
+`ARGUS_FORGE_IDEMPOTENCY_RETENTION_S` seconds (default 86400, 24 h), pruned lazily on the next keyed `POST /run`
+after that, and never while its run is still going. `Idempotent-Replayed` is exposed to browsers under CORS.
 
 > The local CLI `argus-forge run` streams live in your terminal and is independent of the server registry.
 

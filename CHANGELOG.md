@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`Idempotency-Key` on `POST /run`.** A retried `POST /run` can no longer start a second training run (a duplicate
+  holds the GPU for hours). With the optional header (1-200 printable ASCII characters; anything else is a 422 that
+  does not echo it), the same key and the same request body (fingerprinted as the validated `RunRequest`, so JSON
+  spelling doesn't matter) return the run the first request started, in whatever state it is now, with
+  `Idempotent-Replayed: true`; the same key with a different body is a 409, and concurrent requests with one new
+  key start exactly one run. Keys are global to the server, kept beside the run records in
+  `<state_dir>/idempotency/` (only the key's sha256 is written; in memory without a state dir), and pruned lazily
+  after `ARGUS_FORGE_IDEMPOTENCY_RETENTION_S` (default 86400), never while their run is active. Without the header
+  `POST /run` is unchanged. The wire schema and `schema/forge-parity.json` are unchanged.
+
 - **Curator speech exports (#58).** `argus_forge.speech.read_speech_export(export_dir, held_out_dir=None)` reads
   curator's `speech_manifest.jsonl` (`SpeechManifestRow`, `speech_manifest_version` 1.x; another major, or a file
   mixing majors, is refused naming the line) into a `SpeechDataset`: train clips (`split` `train` or null) paired

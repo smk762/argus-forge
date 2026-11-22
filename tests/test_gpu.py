@@ -111,9 +111,12 @@ async def test_lease_is_released_before_the_terminal_event(tmp_path: Path) -> No
     """Whoever acts on `exit` (an argus-proof eval) must find the GPU already free."""
     coord = _Recording()
     export = forge_stub(tmp_path, "kohya", "true\n")
+    released_at_exit: list[list[type[BaseException] | None]] = []
     async for ev in astream_run(RunRequest(export_dir=str(export), trainer="kohya"), coordinator=coord):
         if ev.type == "exit":
-            assert coord.exits == [None]
+            released_at_exit.append(list(coord.exits))
+    assert released_at_exit == [[None]]  # exactly one exit event, and the lease was already released at it
+    assert coord.exits == [None]
 
 
 async def test_failed_run_is_reported_to_the_coordinator(tmp_path: Path) -> None:

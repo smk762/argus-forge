@@ -17,6 +17,7 @@ from pathlib import PurePosixPath, PureWindowsPath
 from typing import Literal
 
 # Re-exported: the rest of forge (and consumers) import the taxonomy from here.
+from argus_cortex.provenance import Provenance
 from argus_cortex.taxonomy import (  # noqa: F401
     TARGET_CATEGORIES,
     TARGET_STYLES,
@@ -51,6 +52,32 @@ MAJORS_REQUIRING_EXPORTED_PATH: frozenset[str] = frozenset({"2"})
 def manifest_major(version: str) -> str:
     """The major component of a ``manifest_version`` string (``'2.7' -> '2'``)."""
     return version.split(".", 1)[0]
+
+
+def check_inside_export_root(field: str, value: str) -> None:
+    """Refuse *value* unless it is a non-empty posix path relative to, and inside, the export root.
+
+    Curator manifests name files under the export root by a relative posix path
+    (``exported_path``, a speech row's ``transcript_path``) that forge joins onto
+    the export dir it was given. An absolute path, ``..``, the root itself, or a
+    Windows spelling (backslash, drive, UNC) would join to somewhere else.
+    """
+    if not value.strip():
+        raise ValueError(f"{field} is empty")
+    rel = PurePosixPath(value)
+    win = PureWindowsPath(value)
+    if (
+        rel.is_absolute()
+        or ".." in rel.parts
+        # "." / "./" normalise to no parts: the export root itself, not a file in it.
+        or not rel.parts
+        # The curator writes posix paths; a backslash or drive/UNC prefix is a
+        # Windows path that a native join would treat as traversal or another root.
+        or "\\" in value
+        or win.drive
+        or win.is_absolute()
+    ):
+        raise ValueError(f"{field} {value!r} must be a relative path inside the export root")
 
 
 # Caption sidecar extension (argus-lens writes these next to the images).
@@ -151,28 +178,172 @@ class ManifestRow(BaseModel):
         written beside the result.
         """
         if self.exported_path is not None:
-            if not self.exported_path.strip():
-                raise ValueError("exported_path is empty")
-            rel = PurePosixPath(self.exported_path)
-            win = PureWindowsPath(self.exported_path)
-            if (
-                rel.is_absolute()
-                or ".." in rel.parts
-                # "." / "./" normalise to no parts: the export root itself, not a file in it.
-                or not rel.parts
-                # The curator writes posix paths; a backslash or drive/UNC prefix is a
-                # Windows path that a native join would treat as traversal or another root.
-                or "\\" in self.exported_path
-                or win.drive
-                or win.is_absolute()
-            ):
-                raise ValueError(f"exported_path {self.exported_path!r} must be a relative path inside the export root")
+            check_inside_export_root("exported_path", self.exported_path)
         elif manifest_major(self.manifest_version) in MAJORS_REQUIRING_EXPORTED_PATH:
             raise ValueError(
                 f"manifest_version {self.manifest_version} row has no exported_path "
                 "— the manifest is malformed; re-export with argus-curator"
             )
+        if self.target_profile.modality != "image":
+            # Curator writes a speech export's rows to speech_manifest.jsonl, never
+            # here; forge's image heuristics are keyed by image categories only.
+            raise ValueError(
+                f"target_profile.modality is {self.target_profile.modality!r}: manifest.jsonl holds image rows "
+                "(a speech export's rows are in speech_manifest.jsonl)"
+            )
         return self
+
+
+# ---------------------------------------------------------------------------
+# Speech: curator's speech_manifest.jsonl (argus-curator#187, forge#58)
+# ---------------------------------------------------------------------------
+
+# Major versions of curator's speech manifest this build understands. Curator
+# stamps every SpeechManifestRow with SPEECH_MANIFEST_VERSION, which moves
+# independently of the image MANIFEST_VERSION under the same rule (major =
+# breaking, minor = additive). 1.x: every key present, null when empty.
+SUPPORTED_SPEECH_MANIFEST_MAJORS: tuple[str, ...] = ("1",)
+
+SplitPart = Literal["train", "held_out"]
+
+
+class SpeechManifestRow(BaseModel):
+    """One line of curator's ``speech_manifest.jsonl`` (``SpeechManifestRow`` 1.x).
+
+    Unknown keys are ignored so a minor version with extra columns still parses;
+    an unknown major is refused up front by
+    :func:`argus_forge.speech.read_speech_manifest`. Curator writes a row only for
+    a clip whose transfer and ``<stem>.txt`` transcript both succeeded.
+
+    ``exported_path`` / ``transcript_path`` (relative to the export root) and
+    their ``*_abs_path`` twins are curator's de-collided destinations, never to
+    be re-derived from ``rel_path``. ``age`` is the corpus's label, never an
+    estimate; forge carries it and decides nothing on it.
+    """
+
+    speech_manifest_version: str
+    modality: Literal["speech"]
+    rel_path: str
+    abs_path: str
+    exported_path: str
+    exported_abs_path: str
+    transcript_path: str
+    transcript_abs_path: str
+    target_profile: TargetProfile
+    transcript: str
+    duration_s: float = Field(ge=0)
+    sample_rate: int = Field(gt=0)
+    channels: int = Field(gt=0)
+    speaker_id: str | None = None
+    speaker_label: str | None = None
+    speaker_cluster: str | None = None
+    speaker_mismatch: bool = False
+    accent: str | None = None
+    language: str | None = None
+    gender: str | None = None
+    age: str | None = None
+    score: float = 0.0
+    similar_group: int = 0
+    split: SplitPart | None = None
+    corpus: str
+    license: str
+    provenance: Provenance
+    consent_release_sha256: str | None = None
+    consent_record_sha256: str | None = None
+
+    @model_validator(mode="after")
+    def _check_paths(self) -> SpeechManifestRow:
+        """The paths forge joins onto the export dir stay inside it, and the transcript pairs with its clip.
+
+        Curator writes ``<stem>.txt`` beside the exported clip; a transcript
+        elsewhere, or under another stem, would pair text with the wrong audio.
+        """
+        check_inside_export_root("exported_path", self.exported_path)
+        check_inside_export_root("transcript_path", self.transcript_path)
+        clip, text = PurePosixPath(self.exported_path), PurePosixPath(self.transcript_path)
+        if text != clip.with_suffix(CAPTION_EXT):
+            raise ValueError(
+                f"transcript_path {self.transcript_path!r} is not the <stem>{CAPTION_EXT} beside "
+                f"exported_path {self.exported_path!r}"
+            )
+        if self.target_profile.modality != "speech":
+            raise ValueError(f"target_profile.modality is {self.target_profile.modality!r}, not 'speech'")
+        return self
+
+
+class SpeechClip(BaseModel):
+    """One training (or held-out) clip, resolved on disk: what a speech emitter reads.
+
+    ``audio`` and ``transcript_file`` are the clip and its ``<stem>.txt`` under
+    the export dir as forge sees it (curator's ``exported_path`` /
+    ``transcript_path`` joined onto it). ``exported_abs_path`` is curator's own
+    absolute path, kept for the record: under a container it names the file in
+    curator's filesystem, not forge's. ``text`` is what the ``.txt`` holds on
+    disk (an edit after export wins over the manifest's ``transcript``).
+    """
+
+    audio: str
+    transcript_file: str
+    exported_path: str
+    exported_abs_path: str
+    rel_path: str
+    text: str
+    duration_s: float
+    sample_rate: int
+    channels: int
+    speaker: str | None = None
+    speaker_label: str | None = None
+    speaker_cluster: str | None = None
+    accent: str | None = None
+    language: str | None = None
+    gender: str | None = None
+    split: SplitPart | None = None
+
+
+class SpeechSource(BaseModel):
+    """Where a set of clips came from: one ``(corpus, license, provenance)`` and how many clips carry it."""
+
+    corpus: str
+    license: str
+    provenance: Provenance
+    consent_release_sha256: str | None = None
+    consent_record_sha256: str | None = None
+    clips: int = 0
+
+
+class SpeechDataset(BaseModel):
+    """A curator speech export read for training: the input a speech (TTS) emitter takes.
+
+    ``clips`` are the rows to train on (``split`` ``train`` or null) whose clip
+    and transcript are both on disk. ``held_out`` are the reference clips from a
+    separate held-out export (or ``held_out`` rows found in this one), never
+    trained on. ``sources`` carries corpus, license and provenance into the run's
+    record.
+    """
+
+    export_dir: str
+    held_out_dir: str | None = None
+    speech_manifest_version: str
+    target_profile: TargetProfile
+    clips: list[SpeechClip] = Field(default_factory=list)
+    held_out: list[SpeechClip] = Field(default_factory=list)
+    # Rows whose clip or transcript is no longer on disk (left out of clips/held_out).
+    missing_from_disk: int = 0
+    # Transcripts whose .txt on disk differs from the manifest's transcript (the .txt wins).
+    transcript_edits: int = 0
+    sources: list[SpeechSource] = Field(default_factory=list)
+
+    @property
+    def hours(self) -> float:
+        return sum(c.duration_s for c in self.clips) / 3600.0
+
+    @property
+    def speakers(self) -> list[str]:
+        return sorted({c.speaker for c in self.clips if c.speaker is not None})
+
+    @property
+    def languages(self) -> list[str]:
+        return sorted({c.language for c in self.clips if c.language is not None})
 
 
 class TrainingParams(BaseModel):

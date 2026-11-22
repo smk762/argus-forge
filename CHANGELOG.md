@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Curator speech exports (#58).** `argus_forge.speech.read_speech_export(export_dir, held_out_dir=None)` reads
+  curator's `speech_manifest.jsonl` (`SpeechManifestRow`, `speech_manifest_version` 1.x; another major, or a file
+  mixing majors, is refused naming the line) into a `SpeechDataset`: train clips (`split` `train` or null) paired
+  with their `<stem>.txt` transcripts from `exported_path` / `transcript_path`, held-out reference clips, speaker,
+  accent, language and gender per clip, and corpus / licence / provenance per source. A held-out speaker (by
+  `speaker_id`, `speaker_label` or `speaker_cluster`) found in training is refused. `SpeechEmitter` is the
+  interface the XTTS-v2 emitter (#56) implements; none ships yet. `argus-forge inspect` summarises a speech export
+  (`--held-out` for the other part). The image path refuses a speech export, and an image `manifest.jsonl` row with
+  a speech profile, instead of reading either as an empty or image set.
+
 - **Pose-dominance warning (curator manifest 2.7).** `ManifestRow` reads curator's optional `pose_labels`
   (`{stance, arms, facing}`, values kept as plain strings so `unknown` and new values parse) and `pose_cluster`
   (argus-puppet's scan-level body-pose cluster); both are null on older rows. When at least 10 rows of the
@@ -32,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **argus-cortex `>=0.13,<0.14`** (was `>=0.6,<0.10`): 0.12 added `TargetProfile.modality` and the speech
+  categories, 0.13 the `consent:<release_sha256>` subject ref curator writes into consented speech rows.
+  `schema/forge-wire.schema.json` is regenerated: `TargetProfile` gains `modality` and `target_category` admits
+  the speech categories (from cortex; argus-studio's generated types follow).
 - **Demo-safe mode refuses a writing `/config` (#52).** With training disabled, a `POST /config` whose
   `dry_run` is false or omitted is now a 403 (as `/run` is) instead of a 200 dry run with a warning, so no
   caller mistakes a preview for a write. Send `"dry_run": true` to render. argus-studio already does.

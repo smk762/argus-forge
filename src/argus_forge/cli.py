@@ -239,11 +239,19 @@ def inspect(
     category: str | None = Option(
         None, "--category", help=f"Override manifest category: {'|'.join(TARGET_CATEGORIES)}"
     ),
-    as_json: bool = Option(False, "--json", help="Print DatasetInfo as JSON"),
+    as_json: bool = Option(False, "--json", help="Print DatasetInfo (SpeechDataset for a speech export) as JSON"),
+    held_out: Path | None = Option(
+        None, "--held-out", help="Speech: the held-out export of the same split (refused if it shares a speaker)"
+    ),
 ) -> None:
-    """Summarise an export dir: images, captions, manifest, suggested params."""
+    """Summarise an export dir: images, captions, manifest, suggested params (or a speech export's clips)."""
     from argus_forge.manifest import inspect_export
     from argus_forge.models import ForgeError
+    from argus_forge.speech import is_speech_export
+
+    if is_speech_export(export_dir) or held_out is not None:
+        _inspect_speech(export_dir, held_out, as_json)
+        return
 
     try:
         info, _ = inspect_export(export_dir, category=category)  # type: ignore[arg-type]
@@ -269,6 +277,32 @@ def inspect(
         f"  suggest:  {p.repeats} repeats x {p.epochs} epochs = {p.total_steps} samples, "
         f"dim/alpha {p.network_dim}/{p.network_alpha}, lr {p.unet_lr}/{p.text_encoder_lr}"
     )
+
+
+def _inspect_speech(export_dir: Path, held_out: Path | None, as_json: bool) -> None:
+    from argus_forge.models import ForgeError
+    from argus_forge.speech import read_speech_export
+
+    try:
+        ds = read_speech_export(export_dir, held_out_dir=held_out)
+    except ForgeError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    if as_json:
+        typer.echo(ds.model_dump_json(indent=2))
+        return
+    typer.echo(f"Speech export: {ds.export_dir}")
+    typer.echo(f"  manifest: speech v{ds.speech_manifest_version}, {ds.missing_from_disk} missing")
+    typer.echo(f"  train:    {len(ds.clips)} clips, {ds.hours:.2f} h, {len(ds.speakers)} speakers")
+    typer.echo(f"  held out: {len(ds.held_out)} clips")
+    typer.echo(f"  language: {', '.join(ds.languages) or '-'}")
+    tp = ds.target_profile
+    typer.echo(f"  profile:  {tp.target_category} / {tp.target_backend or '-'}")
+    for src in ds.sources:
+        typer.echo(f"  source:   {src.corpus} ({src.license or 'no licence'}, {src.provenance.kind}) x{src.clips}")
+    if ds.transcript_edits:
+        typer.echo(f"  note:     {ds.transcript_edits} transcript(s) edited since export; the .txt wins")
+    typer.echo("  emit:     no speech trainer yet (XTTS-v2 is argus-forge#56)")
 
 
 @app.command()

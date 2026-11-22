@@ -413,6 +413,17 @@ def test_unmatched_path_map_warns_instead_of_claiming_remap(export_factory: Expo
     assert any("no rendered path matched" in w for w in result.warnings)
 
 
+def test_identity_path_map_entry_counts_as_a_match(export_factory: ExportFactory) -> None:
+    """A mount shared by container and host (`/x -> /x`) matches without changing the text: no false warning."""
+    export = export_factory(n=3)
+    result = forge_config(
+        ForgeRequest(export_dir=str(export), trainer="kohya", dry_run=True, path_map={str(export): str(export)})
+    )
+    readme = next(f.content for f in result.files if f.name.endswith("README.md"))
+    assert "remapped for the host" in readme
+    assert not any(w.startswith("path_map:") for w in result.warnings)
+
+
 def test_mapping_to_filesystem_root_keeps_valid_paths(export_factory: ExportFactory) -> None:
     export = export_factory(n=3)
     result = forge_config(

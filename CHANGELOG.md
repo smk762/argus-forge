@@ -7,7 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **argus-cortex 0.16** (`>=0.16.1,<0.17`), part of smk762/argus-cortex#212 and #209.
+  - `GET /health` is argus-cortex's `ServiceHealth`: `service_version`, `service`, `version`, `status`,
+    `started_at`, `wire`, `capabilities` (`["training"]` when runs are allowed, else empty), `checks`, `read_only`
+    (demo-safe mode), `build` and `peer`, plus forge's own `export_root` and `training`, unchanged. It is still
+    always 200 with `status: "ok"` (forge has no loading phase and no dependency checks), and
+    `GET /health?checks=0` answers the same. The route is no longer listed in `/openapi.json` or shown on `/docs`.
+  - The `ARGUS_GPU_*` settings (the broker URL and token, the coordinator, the lease path and timeout, the device)
+    are also read from the suite settings file (`~/.config/argus/suite.env`, or `/etc/argus/suite.env` in a
+    container) when the environment leaves them unset or empty. A host whose suite file names a broker now leases
+    through it without setting anything for forge; `ARGUS_GPU_COORDINATOR=none` opts out. Forge never copies the
+    file into its environment, so the trainer still inherits none of the suite's tokens, and nothing else from the
+    file either (`test_suite_settings`).
+  - `ARGUS_FORGE_READONLY` is read from the suite file too when the environment does not set it, with the same
+    fail-safe rule: a value forge cannot parse keeps demo-safe mode on. The file can turn the mode on, never off
+    against the environment.
+
 ### Added
+
+- Compose: the `argus-forge` service carries the discovery labels `argus.peer: forge`,
+  `argus.service: argus-forge`, `argus.health: /health` and `argus.port: "8103"`, and `ARGUS_PEER=forge`, which
+  `/health` reports as `peer`. `compose.suite.yaml` is an opt-in override that mounts the suite file read-only
+  (`COMPOSE_FILE=docker-compose.yaml:compose.suite.yaml`); the mounted file must be owned by root for now
+  (smk762/argus-cortex#218), and the trainer's code can open a mounted file.
+
+### Removed
+
+- `ARGUS_GPU_BROKER_FALLBACK` from `.env.example`. The variable still works, and compose still defaults it to
+  `lease`.
 
 - **`argus-forge serve` registers with the GPU broker at startup** (`gpu.keep_registered`, in the app's lifespan,
   with the same cached coordinator runs lease from), re-registers every five minutes, and signs off after cancelling

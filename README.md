@@ -112,7 +112,7 @@ argus-cortex's coordinator. The variables are the suite's own, so they mean the 
 | Variable | Meaning |
 | -------- | ------- |
 | `ARGUS_GPU_BROKER_URL` | [argus-iris](https://github.com/smk762/argus-iris), e.g. `http://<GPU_HOST>:8120`. Set, it is the coordinator; unset, a run starts at once |
-| `ARGUS_GPU_BROKER_TOKEN` | the shared caller token. Secret: host `.env` only |
+| `ARGUS_GPU_BROKER_TOKEN` | the shared caller token. Secret: host `.env` or the suite file only |
 | `ARGUS_GPU_COORDINATOR` | only to override: `none` (start at once) or `lease` (the host-wide lock file, once the card has room) |
 | `ARGUS_GPU_BROKER_FALLBACK` | `lease` (default) or `none`, used when iris is unreachable or has no lease routes yet |
 | `ARGUS_GPU_LEASE_TIMEOUT_S` | how long a run waits for its lease (default 300 s) before it ends in an `error` event |
@@ -122,6 +122,17 @@ The URL and the token are all the broker needs: argus-cortex reads the tenant fr
 directory or at `/app/gpu-tenant.yaml`, where the image ships it. `argus-forge serve` registers the tenant with iris
 at startup, keeps it registered, and signs off at shutdown; startup never waits on iris. The CLI registers with its
 run's lease.
+
+These `ARGUS_GPU_*` values are host-wide, so they can live once in the suite settings file
+(`~/.config/argus/suite.env`, mode 600; `python -m argus_cortex.settings --init` creates it) instead of in each
+repo's `.env`. The process environment still wins, and an empty value there falls through to the file; a host
+with a suite-wide broker that forge must not use sets `ARGUS_GPU_COORDINATOR=none`. Forge reads the file inside
+the server and never copies it into its environment, so the trainer inherits none of its values: an `HF_TOKEN`
+the trainer needs still goes in the server's own environment (`.env`). In compose the file is mounted only
+when asked, `COMPOSE_FILE=docker-compose.yaml:compose.suite.yaml`, and `compose.suite.yaml` says what that needs
+today: the mounted file must be owned by root
+([argus-cortex#218](https://github.com/smk762/argus-cortex/issues/218)), and the trainer runs in the same
+container, so its code can open a mounted file.
 
 The lease is exclusive: kind `train`, `background` priority, not preemptible, pinned to `<GPU_HOST>`, and sized to
 fill a 24 GiB card, so iris admits nothing else beside it. When a run may start is the operator's decision, made
@@ -237,7 +248,7 @@ argus-forge serve --cors-any --cors-origin https://demo.example --no-run --expor
 
 | Route | Purpose |
 | ----- | ------- |
-| `GET /health` | liveness + version + export root + whether training is enabled |
+| `GET /health` | argus-cortex's `ServiceHealth` (`service`, `version`, `status`, `started_at`, `read_only`, `capabilities`, `peer`) plus forge's `export_root` and `training`; always 200, and not in the OpenAPI document |
 | `GET /trainers` | supported trainers + emitted files |
 | `POST /inspect` | look at an export dir (counts, manifest, suggested params) |
 | `POST /config` | render configs; `dry_run: true` returns contents without writing |

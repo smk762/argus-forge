@@ -82,7 +82,7 @@ try:
 except ImportError as exc:  # pragma: no cover
     raise ImportError("Server requires: pip install argus-forge[server]") from exc
 
-from argus_forge import __version__
+from argus_forge import __version__, gpu
 from argus_forge.core import forge_config
 from argus_forge.emitters import TRAINER_INFO
 from argus_forge.manifest import inspect_export, resolve_export_dir
@@ -365,12 +365,15 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        # No startup work; on shutdown, cancel every in-flight run so no trainer
-        # is left without an owner in this process.
-        try:
-            yield
-        finally:
-            await registry.shutdown()
+        # Register argus-forge with the GPU broker now rather than at the first
+        # run (nothing without ARGUS_GPU_BROKER_URL; never waits on the broker).
+        # On shutdown, cancel every in-flight run so no trainer is left without
+        # an owner in this process, then sign off with the broker.
+        async with gpu.keep_registered():
+            try:
+                yield
+            finally:
+                await registry.shutdown()
 
     app = FastAPI(
         title="Argus Forge",

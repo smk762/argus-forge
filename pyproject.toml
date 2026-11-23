@@ -28,19 +28,19 @@ dependencies = [
     # the consent:<release_sha256> subject ref curator writes into a consented
     # speech row's provenance. Capped below the next untested minor: cortex is pre-1.0, where a
     # minor bump may break. The bare package pulls only pydantic.
-    "argus-cortex>=0.14,<0.15",
+    "argus-cortex>=0.15,<0.16",
 ]
 
 [project.optional-dependencies]
 # argus-cortex[server] carries the suite's shared write-guard and env-flag
 # helpers (argus_cortex.server); it pulls starlette, which fastapi provides too.
-server = ["fastapi>=0.110", "uvicorn>=0.27", "python-multipart>=0.0.7", "argus-cortex[server]>=0.14,<0.15"]
+server = ["fastapi>=0.110", "uvicorn>=0.27", "python-multipart>=0.0.7", "argus-cortex[server]>=0.15,<0.16"]
 # The GPU lease a run takes: [remote] is the argus-iris broker client (httpx),
 # [yaml] reads gpu-tenant.yaml, [gpu] is NVML for the peak-VRAM report. Without
-# it ARGUS_GPU_COORDINATOR=broker cannot lease, and no peak is reported.
-gpu = ["argus-cortex[gpu,remote,yaml]>=0.14,<0.15"]
+# it the broker (ARGUS_GPU_BROKER_URL) cannot lease, and no peak is reported.
+gpu = ["argus-cortex[gpu,remote,yaml]>=0.15,<0.16"]
 cli = ["typer>=0.12", "rich>=13.0"]
-dev = ["pytest>=8.0", "argus-cortex[remote,yaml]>=0.14,<0.15", "pytest-asyncio>=0.23", "ruff==0.15.16", "httpx>=0.27", "httpx2>=2.7", "certifi>=2026.10.19"]
+dev = ["pytest>=8.0", "argus-cortex[remote,yaml]>=0.15,<0.16", "pytest-asyncio>=0.23", "ruff==0.15.16", "httpx>=0.27", "httpx2>=2.7", "certifi>=2026.10.19"]
 
 [project.scripts]
 argus-forge = "argus_forge.cli:app"

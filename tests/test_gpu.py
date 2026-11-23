@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -14,10 +15,12 @@ from argus_cortex.gpu import GpuLease, GpuLeaseTimeout, NullCoordinator
 from argus_cortex.gpu_broker import BrokerCoordinator
 from argus_cortex.gpu_wire import load_tenant_manifest
 from conftest import forge_stub
+from fastapi.testclient import TestClient
 
 from argus_forge import gpu
 from argus_forge.models import RunEvent, RunRequest
 from argus_forge.runner import astream_run
+from argus_forge.server.app import create_app
 
 MANIFEST = Path(__file__).resolve().parent.parent / "gpu-tenant.yaml"
 
@@ -247,3 +250,78 @@ async def test_broker_without_lease_routes_falls_back(tmp_path: Path) -> None:
     )
     assert "[argus-forge] GPU lease granted via fallback" in [e.message for e in events]
     assert events[-1].type == "exit" and events[-1].returncode == 0
+
+
+def test_the_broker_url_alone_selects_the_broker_with_the_committed_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """argus-cortex 0.15: no ARGUS_GPU_COORDINATOR, no manifest path; the URL and ./gpu-tenant.yaml suffice."""
+    monkeypatch.chdir(MANIFEST.parent)  # the image's copy is /app/gpu-tenant.yaml, cortex's second candidate
+    monkeypatch.setenv("ARGUS_GPU_BROKER_URL", "http://broker.invalid:8120")
+    coord = gpu.coordinator()
+    assert isinstance(coord, BrokerCoordinator)
+    assert coord.tenant == gpu.TENANT
+    assert coord.manifest == load_tenant_manifest(MANIFEST)
+
+
+class _FakeBroker:
+    """The broker's tenant routes, recording what reached them."""
+
+    def __init__(self, *, down: bool = False) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.manifests: list[dict] = []
+        self.down = down
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if self.down:
+            raise httpx.ConnectError("refused", request=request)
+        self.calls.append((request.method, request.url.path))
+        if request.method == "POST" and request.url.path == "/tenants":
+            self.manifests.append(json.loads(request.content))
+            return httpx.Response(200, json={"tenant": gpu.TENANT})
+        if request.method == "DELETE" and request.url.path == f"/tenants/{gpu.TENANT}":
+            return httpx.Response(204)
+        return httpx.Response(404)
+
+
+def _use_broker(monkeypatch: pytest.MonkeyPatch, broker: _FakeBroker) -> None:
+    coord = BrokerCoordinator(
+        "http://broker.invalid:8120",
+        tenant=gpu.TENANT,
+        manifest=load_tenant_manifest(MANIFEST),
+        async_transport=httpx.MockTransport(broker),
+        detect_container=False,
+    )
+    monkeypatch.setattr(gpu, "_cached_coordinator", lambda: coord)
+
+
+def test_the_server_registers_at_startup_and_signs_off_at_shutdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lifespan registers the process's coordinator (the one runs lease from) and unregisters on the way out."""
+    broker = _FakeBroker()
+    _use_broker(monkeypatch, broker)
+    with TestClient(create_app(export_root=str(tmp_path))) as client:
+        deadline = time.monotonic() + 5
+        while ("POST", "/tenants") not in broker.calls:
+            assert time.monotonic() < deadline, "never registered"
+            time.sleep(0.01)
+        assert client.get("/health").status_code == 200
+    assert broker.calls[-1] == ("DELETE", f"/tenants/{gpu.TENANT}")
+    assert broker.manifests[0]["tenant"] == gpu.TENANT
+    assert [k["kind"] for k in broker.manifests[0]["kinds"]] == [gpu.LEASE_KIND_TRAIN]
+
+
+def test_a_down_broker_never_stops_the_server_starting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _use_broker(monkeypatch, _FakeBroker(down=True))
+    with TestClient(create_app(export_root=str(tmp_path))) as client:
+        assert client.get("/health").status_code == 200
+
+
+def test_an_unusable_coordinator_never_stops_the_server_starting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bad ARGUS_GPU_COORDINATOR is logged at startup and left for the first run's error event."""
+    monkeypatch.setenv("ARGUS_GPU_COORDINATOR", "borker")
+    with TestClient(create_app(export_root=str(tmp_path))) as client:
+        assert client.get("/health").status_code == 200

@@ -65,7 +65,8 @@ import or API) belongs in argus-ci's `suite-rules/` catalogue rather than a test
 - kohya's image glob doesn't recurse, which is why it gets one subset per directory.
 - A new trainer is a module in `emitters/` registered in `emitters/__init__.py`; it is runnable only if its
   `TrainerInfo.entrypoint` is set.
-- A run's GPU lease comes from argus-cortex's coordinator (`gpu.py`); `ARGUS_GPU_COORDINATOR` unset means `none`, so
+- A run's GPU lease comes from argus-cortex's coordinator (`gpu.py`); `ARGUS_GPU_BROKER_URL` alone selects the broker
+  (`serve` registers the tenant at startup), and with neither it nor `ARGUS_GPU_COORDINATOR` set it is `none`, so
   runs start at once. The lease size (`FORGE_GPU_VRAM_MB`, default 22000) is below the card's 24 GiB because iris keeps
   per-node headroom; a full-card request could never be admitted.
 - Shared suite code (taxonomy, wire-schema building, the server write-guard and env-flag helpers) lives in

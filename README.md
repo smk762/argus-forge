@@ -111,13 +111,17 @@ argus-cortex's coordinator. The variables are the suite's own, so they mean the 
 
 | Variable | Meaning |
 | -------- | ------- |
-| `ARGUS_GPU_COORDINATOR` | `none` (default): start at once. `lease`: the host-wide lock file, once the card has room. `broker`: ask [argus-iris](https://github.com/smk762/argus-iris). |
-| `ARGUS_GPU_BROKER_URL` | iris, e.g. `http://<GPU_HOST>:8120` |
+| `ARGUS_GPU_BROKER_URL` | [argus-iris](https://github.com/smk762/argus-iris), e.g. `http://<GPU_HOST>:8120`. Set, it is the coordinator; unset, a run starts at once |
 | `ARGUS_GPU_BROKER_TOKEN` | the shared caller token. Secret: host `.env` only |
-| `ARGUS_GPU_TENANT_MANIFEST` | the committed [`gpu-tenant.yaml`](gpu-tenant.yaml) (the image ships it at `/app/gpu-tenant.yaml`), or `ARGUS_GPU_TENANT=argus-forge` |
+| `ARGUS_GPU_COORDINATOR` | only to override: `none` (start at once) or `lease` (the host-wide lock file, once the card has room) |
 | `ARGUS_GPU_BROKER_FALLBACK` | `lease` (default) or `none`, used when iris is unreachable or has no lease routes yet |
 | `ARGUS_GPU_LEASE_TIMEOUT_S` | how long a run waits for its lease (default 300 s) before it ends in an `error` event |
 | `FORGE_GPU_VRAM_MB` | the lease's footprint (default 22000 MiB) |
+
+The URL and the token are all the broker needs: argus-cortex reads the tenant from `gpu-tenant.yaml` in the working
+directory or at `/app/gpu-tenant.yaml`, where the image ships it. `argus-forge serve` registers the tenant with iris
+at startup, keeps it registered, and signs off at shutdown; startup never waits on iris. The CLI registers with its
+run's lease.
 
 The lease is exclusive: kind `train`, `background` priority, not preemptible, pinned to `<GPU_HOST>`, and sized to
 fill a 24 GiB card, so iris admits nothing else beside it. When a run may start is the operator's decision, made

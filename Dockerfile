@@ -56,7 +56,7 @@ RUN apt-get update \
 # single-stage image) is a build tool and never runs here.
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin/argus-forge /usr/local/bin/argus-forge
-# The argus-iris tenant manifest; compose's ARGUS_GPU_TENANT_MANIFEST points here (#41).
+# The argus-iris tenant manifest, where argus-cortex looks for it (#41).
 COPY gpu-tenant.yaml /app/gpu-tenant.yaml
 
 # Both docker-compose.yaml and the README's `docker run -v ...:/data/out` use

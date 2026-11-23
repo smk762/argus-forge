@@ -18,7 +18,9 @@ a sandbox.
 The suite settings file (:mod:`argus_cortex.settings`) is read inside this
 process and never copied into ``os.environ`` (forge does not call
 ``settings.apply()``), so nothing in it, tokens included, reaches the child's
-environment; ``tests/test_suite_settings.py`` holds that.
+environment; ``tests/test_suite_settings.py`` holds that. Forge's container is
+not given the file at all (no compose file mounts it): the trainer could read it
+from disk.
 """
 
 from __future__ import annotations

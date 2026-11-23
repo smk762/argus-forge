@@ -16,8 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     always 200 with `status: "ok"` (forge has no loading phase and no dependency checks), and
     `GET /health?checks=0` answers the same. The route is no longer listed in `/openapi.json` or shown on `/docs`.
   - The `ARGUS_GPU_*` settings (the broker URL and token, the coordinator, the lease path and timeout, the device)
-    are also read from the suite settings file (`~/.config/argus/suite.env`, or `/etc/argus/suite.env` in a
-    container) when the environment leaves them unset or empty. A host whose suite file names a broker now leases
+    are also read from the suite settings file (`~/.config/argus/suite.env`) when `argus-forge serve` runs
+    directly on a host and the environment leaves them unset or empty. A host whose suite file names a broker now leases
     through it without setting anything for forge; `ARGUS_GPU_COORDINATOR=none` opts out. Forge never copies the
     file into its environment, so the trainer still inherits none of the suite's tokens, and nothing else from the
     file either (`test_suite_settings`).
@@ -29,9 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Compose: the `argus-forge` service carries the discovery labels `argus.peer: forge`,
   `argus.service: argus-forge`, `argus.health: /health` and `argus.port: "8103"`, and `ARGUS_PEER=forge`, which
-  `/health` reports as `peer`. `compose.suite.yaml` is an opt-in override that mounts the suite file read-only
-  (`COMPOSE_FILE=docker-compose.yaml:compose.suite.yaml`); the mounted file must be owned by root for now
-  (smk762/argus-cortex#218), and the trainer's code can open a mounted file.
+  `/health` reports as `peer`.
+  Forge's container is not given the suite settings file, and no compose file here mounts it: the trainer shares
+  the container, and the file holds the suite's tokens. The broker URL and token (and `HF_TOKEN` where needed) go
+  in forge's own environment.
 
 ### Removed
 

@@ -64,8 +64,8 @@ services:
       # flock below) is what it falls back to when iris is down. Read only
       # when a run starts; rendering configs never takes a lease.
       # Unset: the broker when ARGUS_GPU_BROKER_URL is set, else none.
-      # The broker URL and token may come from the suite settings file instead
-      # (compose.suite.yaml): an empty value here falls through to it.
+      # The broker URL and token come from .env: this container is never given
+      # the suite settings file, because the trainer shares it.
       ARGUS_GPU_COORDINATOR: ${ARGUS_GPU_COORDINATOR:-}
       ARGUS_GPU_LEASE_PATH: /run/argus-gpu/argus-gpu.lock
       ARGUS_GPU_LEASE_TIMEOUT_S: ${ARGUS_GPU_LEASE_TIMEOUT_S:-}

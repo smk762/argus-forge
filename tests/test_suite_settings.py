@@ -8,6 +8,7 @@ where the suite's tokens live.
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,7 @@ from argus_forge.runner import child_env
 from argus_forge.server.app import create_app, env_readonly
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "argus_forge"
+REPO = SRC.parent.parent
 
 # Made-up names and values: a real variable may be exported in the shell.
 FAKE_TOKEN = "not-a-real-token"
@@ -114,3 +116,17 @@ def test_gpu_device_is_read_through_the_suite_file(tmp_path: Path, monkeypatch: 
     assert gpu._device(_Lease()) == 1  # type: ignore[arg-type]
     monkeypatch.setenv(gpu.DEVICE_ENV, "2")
     assert gpu._device(_Lease()) == 2  # type: ignore[arg-type]
+
+
+def test_no_compose_file_mounts_the_suite_file() -> None:
+    """The trainer runs in forge's container as the same user, so a mounted suite file would put the suite's
+    tokens where trainer code can read them, whatever the environment filter does. No compose file mounts one."""
+    files = sorted({*REPO.glob("*compose*.y*ml"), *REPO.glob("compose/**/*.y*ml"), *REPO.glob("deploy/**/*.y*ml")})
+    assert any(f.name == "docker-compose.yaml" for f in files), "the compose scan is broken"
+    offenders = []
+    for path in files:
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            code = line.split("#", 1)[0]
+            if re.search(r"suite\.env\b|ARGUS_SUITE_ENV|ARGUS_ENV_FILE", code):
+                offenders.append(f"{path.name}:{number}")
+    assert not offenders, "a compose file gives the container the suite settings file:\n" + "\n".join(offenders)

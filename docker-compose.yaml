@@ -19,7 +19,17 @@ services:
     image: argus-forge:${FORGE_BUILD_TARGET:-runtime}-local
     ports:
       - "${FORGE_PORT:-8103}:8103"
+    # What a discovery layer (argus-iris's agents) reads to list this service:
+    # the name callers ask for, the package, and where its health route is.
+    labels:
+      argus.peer: forge
+      argus.service: argus-forge
+      argus.health: /health
+      argus.port: "8103"
     environment:
+      # The argus.peer label above, repeated for the process (it cannot read its
+      # own labels); /health reports it as `peer`.
+      ARGUS_PEER: forge
       # Containment root for request-supplied export_dir paths. Required — the
       # API refuses every /inspect, /config and /run without it.
       ARGUS_FORGE_EXPORT_ROOT: /data/out
@@ -54,6 +64,8 @@ services:
       # flock below) is what it falls back to when iris is down. Read only
       # when a run starts; rendering configs never takes a lease.
       # Unset: the broker when ARGUS_GPU_BROKER_URL is set, else none.
+      # The broker URL and token come from .env: this container is never given
+      # the suite settings file, because the trainer shares it.
       ARGUS_GPU_COORDINATOR: ${ARGUS_GPU_COORDINATOR:-}
       ARGUS_GPU_LEASE_PATH: /run/argus-gpu/argus-gpu.lock
       ARGUS_GPU_LEASE_TIMEOUT_S: ${ARGUS_GPU_LEASE_TIMEOUT_S:-}

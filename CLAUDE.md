@@ -37,6 +37,8 @@ import or API) belongs in argus-ci's `suite-rules/` catalogue rather than a test
 | Add a write route that read-only mode doesn't cover (it must sit under `/run`, or be listed with why it writes nothing) | `test_rules::test_every_write_route_is_refused_or_known_safe_under_readonly` |
 | Accept a cross-site write, including under `--cors-any` | `test_server::test_cross_site_write_is_refused`, `::test_wildcard_still_refuses_cross_site_writes` |
 | Let a caller's env set anything outside `models.RUN_ENV_KEYS` (a loader, shell or interpreter hook changes what `/run` executes), or hand the trainer the suite's tokens | `test_runner::test_prepare_run_rejects_exec_hijacking_env`, `::test_trainer_does_not_inherit_suite_secrets`, `test_server::test_run_blocked_env_is_400` |
+| Call `argus_cortex.settings.apply()`, or otherwise copy the suite settings file into the environment: the trainer inherits it, and the file holds the suite's tokens | `test_suite_settings::test_forge_never_applies_the_suite_file_to_the_environment`, `::test_trainer_gets_nothing_from_the_suite_file` |
+| Mount the suite settings file (a path ending in `suite.env`) into forge's container in any compose file: the trainer shares the container and could read the tokens from disk | `test_suite_settings::test_no_compose_file_mounts_the_suite_file` |
 | Leave a trainer running after its run is cancelled | `test_runner::test_cancelled_run_kills_the_process`, `test_jobs::test_double_cancel_does_not_orphan_the_trainer` |
 | Start a trainer without its GPU lease, or after the lease was refused or timed out | `test_gpu::test_run_takes_an_exclusive_background_lease`, `::test_lease_not_granted_is_an_error_and_nothing_runs` |
 | Send a run's terminal event while still holding its GPU lease | `test_gpu::test_lease_is_released_before_the_terminal_event` |
@@ -69,6 +71,10 @@ import or API) belongs in argus-ci's `suite-rules/` catalogue rather than a test
   (`serve` registers the tenant at startup), and with neither it nor `ARGUS_GPU_COORDINATOR` set it is `none`, so
   runs start at once. The lease size (`FORGE_GPU_VRAM_MB`, default 22000) is below the card's 24 GiB because iris keeps
   per-node headroom; a full-card request could never be admitted.
+- `/health` is argus-cortex's `ServiceHealth` (`install_health`); forge's own fields (`export_root`, `training`) ride
+  in `extra` and must keep their names. It has no checks and no readiness, so it is always 200.
+- The suite settings file is read through cortex (`ARGUS_GPU_*`, and `ARGUS_FORGE_READONLY` with its fail-safe
+  rule) when forge runs directly on a host; the container is never given the file. Tests never see a developer's file: `tests/conftest.py` sets `ARGUS_ENV_FILE=off`.
 - Shared suite code (taxonomy, wire-schema building, the server write-guard and env-flag helpers) lives in
   **argus-cortex** (`argus-cortex[server]`).
 - Run one test: `uv run --no-sync pytest tests/test_core.py::test_name -q`. `make help` lists the rest; ruff is pinned

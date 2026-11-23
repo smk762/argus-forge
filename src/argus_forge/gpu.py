@@ -30,6 +30,7 @@ import os
 from collections.abc import AsyncIterator
 
 import structlog
+from argus_cortex import settings
 from argus_cortex.gpu import GpuCoordinator, GpuLease, aregistered, coordinator_from_env, free_vram_mb
 from argus_cortex.gpu_wire import GpuConstraints
 
@@ -110,7 +111,8 @@ def _device(lease: GpuLease) -> int:
     if lease.device is not None:
         return lease.device
     try:
-        return int(os.environ.get(DEVICE_ENV, "") or 0)
+        # Through cortex's settings, as its coordinator reads the same variable.
+        return int(settings.get(DEVICE_ENV) or 0)
     except ValueError:
         return 0
 

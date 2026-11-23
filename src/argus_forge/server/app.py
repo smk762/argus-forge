@@ -2,7 +2,7 @@
 
 Routes:
 
-    GET  /health           -> {status, service, version, export_root, training}
+    GET  /health           -> argus-cortex ServiceHealth + {export_root, training}
     GET  /trainers         -> list[TrainerInfo]
     POST /inspect          -> DatasetInfo    (read-only look at an export dir)
     POST /config           -> ForgeResult    (render configs; dry_run for preview)
@@ -74,7 +74,9 @@ from pathlib import Path
 import structlog
 
 try:
+    from argus_cortex import settings as suite_settings
     from argus_cortex.server import FALSY, TRUTHY, WriteGuard, cross_site_refuse, env_flag
+    from argus_cortex.service import install_health
     from fastapi import Depends, FastAPI, Header, HTTPException, Response
     from fastapi.responses import JSONResponse, StreamingResponse
     from starlette.datastructures import Headers
@@ -229,7 +231,9 @@ def env_readonly() -> bool:
     runs. Never fatal — under compose's ``restart: unless-stopped`` a hard exit
     would be a crash loop.
     """
-    raw = os.environ.get(READONLY_ENV, "").strip().lower()
+    # Read where env_flag reads (the environment, then the suite file), so a typo
+    # in either place fails safe rather than only one in the environment.
+    raw = (suite_settings.get(READONLY_ENV) or "").strip().lower()
     on = env_flag(READONLY_ENV)  # recognised truthy; also logs the typo warning
     if raw and raw not in FALSY and raw not in TRUTHY:
         return True
@@ -483,21 +487,28 @@ def create_app(
             raise HTTPException(status_code=400, detail=f"export root is not a directory: {raw_root}")
         return _resolve_within(root, resolved_root, export_dir)
 
-    # Fixed for the life of the app, so it is built once rather than stat'ing
-    # the export root on every liveness probe.
-    health = {
-        "status": "ok",
-        "service": "argus-forge",
-        "version": __version__,
+    # argus-cortex's ServiceHealth (the suite's one /health shape) plus forge's own
+    # fields, which keep their names and meaning. The extras are fixed for the
+    # life of the app, so they are built once rather than stat'ing the export
+    # root on every liveness probe. No dependency checks and no readiness: forge
+    # has no loading phase and probes nothing per request, so the route is always
+    # 200 with status "ok", as before. Registered outside the OpenAPI document.
+    health_extra = {
         "export_root": health_root,
         # Lets a client disable its train affordance up front instead of
         # learning about demo-safe mode from a 403.
         "training": "enabled" if allow_run else "disabled",
     }
-
-    @app.get("/health")
-    async def health_route() -> dict[str, str | None]:
-        return health
+    install_health(
+        app,
+        service="argus-forge",
+        # The package's own version, not the installed distribution's: the image
+        # is built with VERSION handed in, and /health reports it verbatim.
+        version=__version__,
+        capabilities=["training"] if allow_run else [],
+        read_only=not allow_run,
+        extra=lambda: health_extra,
+    )
 
     @app.get("/trainers", response_model=list[TrainerInfo])
     async def trainers() -> list[TrainerInfo]:

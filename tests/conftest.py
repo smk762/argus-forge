@@ -33,6 +33,12 @@ def _isolate_server_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_suite_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never read a developer's suite settings file (``~/.config/argus/suite.env``): it holds real tokens."""
+    monkeypatch.setenv("ARGUS_ENV_FILE", "off")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_gpu_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """No GPU coordinator unless a test asks for one: a broker URL in the shell must not gate test runs."""
     from argus_forge import gpu

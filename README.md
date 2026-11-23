@@ -123,6 +123,13 @@ directory or at `/app/gpu-tenant.yaml`, where the image ships it. `argus-forge s
 at startup, keeps it registered, and signs off at shutdown; startup never waits on iris. The CLI registers with its
 run's lease.
 
+Forge's container is not given the suite settings file (`~/.config/argus/suite.env`): the trainer shares the
+container, and the file holds the suite's tokens. Give forge the broker URL and token (and `HF_TOKEN` where the
+trainer needs it) through its own environment (`.env`). Run directly on a host (`argus-forge serve` outside a
+container), forge reads the suite file through argus-cortex for these `ARGUS_GPU_*` values when its environment
+leaves them unset or empty (`ARGUS_GPU_COORDINATOR=none` opts out of a suite-wide broker), and never copies the
+file into its environment, so the trainer inherits none of its values.
+
 The lease is exclusive: kind `train`, `background` priority, not preemptible, pinned to `<GPU_HOST>`, and sized to
 fill a 24 GiB card, so iris admits nothing else beside it. When a run may start is the operator's decision, made
 with a schedule window for `argus-forge` in iris's policy file. While it waits, the stream shows
@@ -237,7 +244,7 @@ argus-forge serve --cors-any --cors-origin https://demo.example --no-run --expor
 
 | Route | Purpose |
 | ----- | ------- |
-| `GET /health` | liveness + version + export root + whether training is enabled |
+| `GET /health` | argus-cortex's `ServiceHealth` (`service`, `version`, `status`, `started_at`, `read_only`, `capabilities`, `peer`) plus forge's `export_root` and `training`; always 200, and not in the OpenAPI document |
 | `GET /trainers` | supported trainers + emitted files |
 | `POST /inspect` | look at an export dir (counts, manifest, suggested params) |
 | `POST /config` | render configs; `dry_run: true` returns contents without writing |

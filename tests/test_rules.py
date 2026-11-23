@@ -89,6 +89,14 @@ def _delegates(node: ast.AST, cortex_module: str) -> bool:
     )
 
 
+# Cortex function names too generic to mean "a copy" when they are a *method* of a forge
+# class, with the cortex function they collide with. A module-level definition of the
+# same name is still a clash.
+GENERIC_METHOD_NAMES = {
+    "get": "argus_cortex.settings.get reads a setting; a store's get(id) is a lookup, not a copy of it",
+}
+
+
 def test_forge_does_not_reimplement_cortex() -> None:
     """No function or class in forge shares a name with one argus-cortex already provides.
 
@@ -100,13 +108,18 @@ def test_forge_does_not_reimplement_cortex() -> None:
     """
     cortex = _cortex_public_callables()
     assert "WriteGuard" in cortex and "wire_schema" in cortex, "cortex scan is broken"
+    assert set(GENERIC_METHOD_NAMES) <= set(cortex), "GENERIC_METHOD_NAMES names something cortex no longer has"
     clashes = []
     for path in sorted(SRC.rglob("*.py")):
         if path.name == "_version.py":
             continue
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        methods = {id(n) for c in ast.walk(tree) if isinstance(c, ast.ClassDef) for n in c.body}
+        for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) and node.name in cortex:
                 if _delegates(node, cortex[node.name]):
+                    continue
+                if node.name in GENERIC_METHOD_NAMES and id(node) in methods:
                     continue
                 rel = path.relative_to(SRC.parent)
                 clashes.append(f"{rel}:{node.lineno} {node.name} (cortex has {cortex[node.name]}.{node.name})")

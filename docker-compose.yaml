@@ -53,14 +53,13 @@ services:
       # starts a run at once; `broker` asks argus-iris, and `lease` (the local
       # flock below) is what it falls back to when iris is down. Read only
       # when a run starts; rendering configs never takes a lease.
-      ARGUS_GPU_COORDINATOR: ${ARGUS_GPU_COORDINATOR:-none}
+      # Unset: the broker when ARGUS_GPU_BROKER_URL is set, else none.
+      ARGUS_GPU_COORDINATOR: ${ARGUS_GPU_COORDINATOR:-}
       ARGUS_GPU_LEASE_PATH: /run/argus-gpu/argus-gpu.lock
       ARGUS_GPU_LEASE_TIMEOUT_S: ${ARGUS_GPU_LEASE_TIMEOUT_S:-}
       ARGUS_GPU_BROKER_URL: ${ARGUS_GPU_BROKER_URL:-}
       ARGUS_GPU_BROKER_TOKEN: ${ARGUS_GPU_BROKER_TOKEN:-}
       ARGUS_GPU_BROKER_FALLBACK: ${ARGUS_GPU_BROKER_FALLBACK:-lease}
-      ARGUS_GPU_TENANT_MANIFEST: ${ARGUS_GPU_TENANT_MANIFEST:-/app/gpu-tenant.yaml}
-      ARGUS_GPU_TENANT: ${ARGUS_GPU_TENANT:-}
       FORGE_GPU_VRAM_MB: ${FORGE_GPU_VRAM_MB:-}
     volumes:
       # The curator export dir forge reads, and writes <export>/forge/ into.

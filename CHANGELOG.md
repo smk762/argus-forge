@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`argus-forge serve` registers with the GPU broker at startup** (`gpu.keep_registered`, in the app's lifespan,
+  with the same cached coordinator runs lease from), re-registers every five minutes, and signs off after cancelling
+  in-flight runs at shutdown, so argus-iris knows the tenant before its first run. A down broker never blocks startup;
+  an unusable `ARGUS_GPU_*` environment is logged and still ends the first run in an `error` event. The CLI registers
+  with its run's lease.
 - **One active run at a time on `POST /run`.** While a run is active, which means status `running`, including a run
   still queued for its argus-iris `train` lease, another `POST /run` is a 409 and creates nothing, so two clients
   (two studio tabs) can no longer start two runs. The body is the new wire model `RunActiveError`:
@@ -65,6 +70,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **argus-cortex 0.14 → 0.15**, pinned `>=0.15,<0.16` (base, `server`, `gpu`, `dev`). `ARGUS_GPU_BROKER_URL` (and
+  `ARGUS_GPU_BROKER_TOKEN`) is all the broker needs: cortex selects it from the URL alone and finds the image's
+  `/app/gpu-tenant.yaml` itself. Compose no longer defaults `ARGUS_GPU_COORDINATOR` to `none` (it still passes an
+  explicit `none` or `lease` through) and drops `ARGUS_GPU_TENANT` and `ARGUS_GPU_TENANT_MANIFEST`; `.env.example`
+  leaves `ARGUS_GPU_COORDINATOR` commented out. **Behaviour change:** a host that set `ARGUS_GPU_BROKER_URL` without
+  `ARGUS_GPU_COORDINATOR` now leases from the broker; set `ARGUS_GPU_COORDINATOR=none` to keep starting runs at
+  once. A `.env` copied from the old `.env.example` still says `ARGUS_GPU_COORDINATOR=none`, which wins: delete that
+  line to use the broker by its URL alone.
 - **argus-cortex `>=0.13,<0.14`** (was `>=0.6,<0.10`): 0.12 added `TargetProfile.modality` and the speech
   categories, 0.13 the `consent:<release_sha256>` subject ref curator writes into consented speech rows.
   `schema/forge-wire.schema.json` is regenerated: `TargetProfile` gains `modality` and `target_category` admits

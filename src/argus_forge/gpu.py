@@ -7,10 +7,14 @@ declared in the committed ``gpu-tenant.yaml``; ``tests/test_gpu.py`` keeps the
 constants here and the manifest in step.
 
 Which coordinator is the environment's (:func:`argus_cortex.gpu.coordinator_from_env`):
-unset ``ARGUS_GPU_COORDINATOR`` means ``none``, so a run starts at once exactly as
-it did before the broker existed. With ``broker``, iris decides when the run may
-start (the operator's schedule window for ``argus-forge`` sets its class); when iris
-is unreachable the lease comes from ``ARGUS_GPU_BROKER_FALLBACK`` instead.
+``ARGUS_GPU_BROKER_URL`` (with ``ARGUS_GPU_BROKER_TOKEN``) alone selects the broker,
+whose tenant comes from ``gpu-tenant.yaml`` in the working directory or at
+``/app/gpu-tenant.yaml``, where the image ships it; with no URL and no
+``ARGUS_GPU_COORDINATOR`` it is ``none``, so a run starts at once exactly as it did
+before the broker existed. With the broker, iris decides when the run may start
+(the operator's schedule window for ``argus-forge`` sets its class); when iris is
+unreachable the lease comes from ``ARGUS_GPU_BROKER_FALLBACK`` instead. The server
+registers the tenant at startup (:func:`keep_registered`); the CLI with its lease.
 
 Peak VRAM is sampled through NVML (``argus-cortex[gpu]``) as the drop in the card's
 free memory below what was free at launch; the lease is whole-card, so that drop is
@@ -26,7 +30,7 @@ import os
 from collections.abc import AsyncIterator
 
 import structlog
-from argus_cortex.gpu import GpuCoordinator, GpuLease, coordinator_from_env, free_vram_mb
+from argus_cortex.gpu import GpuCoordinator, GpuLease, aregistered, coordinator_from_env, free_vram_mb
 from argus_cortex.gpu_wire import GpuConstraints
 
 logger = structlog.get_logger()
@@ -81,6 +85,25 @@ def coordinator() -> GpuCoordinator:
         return _cached_coordinator()
     except Exception as exc:
         raise LeaseNotGranted(f"no usable GPU coordinator: {exc}") from exc
+
+
+@contextlib.asynccontextmanager
+async def keep_registered() -> AsyncIterator[None]:
+    """Keep the process's coordinator registered with the GPU broker for the body (the
+    server's lifetime) and sign off at the end, so iris knows argus-forge before its
+    first run. A no-op for the local coordinators; never blocks startup on the broker,
+    and an unusable environment is logged here and reported by the first run instead.
+    """
+    try:
+        coord: GpuCoordinator | None = coordinator()
+    except LeaseNotGranted as exc:
+        logger.warning("gpu_register_skipped", error=str(exc))
+        coord = None
+    if coord is None:
+        yield
+        return
+    async with aregistered(coord):
+        yield
 
 
 def _device(lease: GpuLease) -> int:

@@ -17,13 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `GET /health?checks=0` answers the same. The route is no longer listed in `/openapi.json` or shown on `/docs`.
   - The `ARGUS_GPU_*` settings (the broker URL and token, the coordinator, the lease path and timeout, the device)
     are also read from the suite settings file (`~/.config/argus/suite.env`) when `argus-forge serve` runs
-    directly on a host and the environment leaves them unset or empty. A host whose suite file names a broker now leases
-    through it without setting anything for forge; `ARGUS_GPU_COORDINATOR=none` opts out. Forge never copies the
+    directly on a host and the environment leaves them unset or empty. A host whose suite file names a broker now
+    leases through it without setting anything for forge; `ARGUS_GPU_COORDINATOR=none` opts out. Forge never copies the
     file into its environment, so the trainer still inherits none of the suite's tokens, and nothing else from the
     file either (`test_suite_settings`).
   - `ARGUS_FORGE_READONLY` is read from the suite file too when the environment does not set it, with the same
     fail-safe rule: a value forge cannot parse keeps demo-safe mode on. The file can turn the mode on, never off
     against the environment.
+  - `.env.example` no longer lists `ARGUS_GPU_BROKER_FALLBACK`. The variable still works, and compose still
+    defaults it to `lease`.
 
 ### Added
 
@@ -33,11 +35,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Forge's container is not given the suite settings file, and no compose file here mounts it: the trainer shares
   the container, and the file holds the suite's tokens. The broker URL and token (and `HF_TOKEN` where needed) go
   in forge's own environment.
-
-### Removed
-
-- `ARGUS_GPU_BROKER_FALLBACK` from `.env.example`. The variable still works, and compose still defaults it to
-  `lease`.
 
 - **`argus-forge serve` registers with the GPU broker at startup** (`gpu.keep_registered`, in the app's lifespan,
   with the same cached coordinator runs lease from), re-registers every five minutes, and signs off after cancelling

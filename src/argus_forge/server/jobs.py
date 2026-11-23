@@ -35,10 +35,10 @@ import os
 import re
 from collections import deque
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
 from pathlib import Path
 
 import structlog
+from argus_cortex.timestamps import utc_now_iso
 from pydantic import ValidationError
 
 from argus_forge.manifest import resolve_export_dir
@@ -63,10 +63,6 @@ if MAX_BUFFERED_EVENTS < 1:  # pragma: no cover - guards a mis-tune, not a runti
     raise ValueError("MAX_BUFFERED_EVENTS must be >= 1: a zero-length window leaves a cursor nothing to read")
 # Finished runs kept in the registry (most-recent-first) before eviction.
 MAX_FINISHED_JOBS = 64
-
-
-def _now() -> str:
-    return datetime.now(UTC).isoformat()
 
 
 # The reason a run restored as `running` is reported failed.
@@ -171,7 +167,7 @@ class Job:
         self.status: RunStatus = "running"
         self.returncode: int | None = None
         self.message: str | None = None
-        self.started_at = _now()
+        self.started_at = utc_now_iso("auto")
         self.ended_at: str | None = None
         self.lora: RunArtifact | None = None
         self._store = store
@@ -352,7 +348,7 @@ class Job:
         if self._done.is_set():
             return
         self.status = status
-        self.ended_at = _now()
+        self.ended_at = utc_now_iso("auto")
         self._done.set()
         self.save()
         # Wake every viewer: each one drains what is left in the buffer, sees the

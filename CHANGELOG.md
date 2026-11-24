@@ -113,6 +113,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `dry_run` is false or omitted is now a 403 (as `/run` is) instead of a 200 dry run with a warning, so no
   caller mistakes a preview for a write. Send `"dry_run": true` to render. argus-studio already does.
 
+### Fixed
+
+- A diffusers run whose hand-edited `train.sh` passes a relative `--output_dir` now reports its LoRA, read from the
+  run's own directory. It is still refused when the script changes directory or the value needs shell expansion.
+- `--output_dir PATH` (space-separated) in a diffusers `train.sh` is read like `--output_dir=PATH`.
+- A run record that cannot be saved no longer leaves `/run/{id}/stream` viewers hanging, and one holding a path that
+  is not valid UTF-8 is logged instead of raising.
+
 ## [0.3.0] - 2026-11-19
 
 ### Added

@@ -96,7 +96,7 @@ class RunStore:
             self.dir.mkdir(parents=True, exist_ok=True)
             tmp.write_text(state.model_dump_json(), encoding="utf-8")
             os.replace(tmp, path)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:  # ValueError: text that isn't valid UTF-8 (a path's surrogates)
             logger.error("run_record_save_failed", run_id=state.run_id, error=repr(exc))
 
     def delete(self, run_id: str) -> None:
@@ -350,7 +350,6 @@ class Job:
         self.status = status
         self.ended_at = utc_now_iso("auto")
         self._done.set()
-        self.save()
         # Wake every viewer: each one drains what is left in the buffer, sees the
         # `finished` it read on its next pass, and ends its own iteration.
         for viewer in self._subscribers:
@@ -367,6 +366,9 @@ class Job:
         # draining and returns on it. That ordering is the load-bearing one; the
         # wakeup only ensures a parked viewer gets a pass at all.
         self._subscribers.clear()
+        # Last: nothing retries a finalize, so if saving raised any earlier the
+        # viewers would stay parked forever.
+        self.save()
 
     async def _drive(self) -> None:
         status: RunStatus = "succeeded"  # a run that ends without a terminal event (dry_run) still succeeded

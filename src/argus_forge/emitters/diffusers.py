@@ -12,6 +12,7 @@ script plus flags. Forge emits:
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 from pathlib import Path
@@ -23,15 +24,23 @@ from argus_forge.models import ForgeError, GeneratedFile
 # The file train_text_to_image_lora_sdxl.py saves into --output_dir
 # (StableDiffusionXLPipeline.save_lora_weights' default weight_name).
 LORA_FILENAME = "pytorch_lora_weights.safetensors"
-_OUTPUT_FLAG = "--output_dir="
+_OUTPUT_FLAG = "--output_dir"
 _CONTINUATION = re.compile(r"\\\r?\n")
+# A word that moves the script out of the directory it was launched in.
+_CHDIR = re.compile(r"(?:.*[(;&|])?(?:cd|pushd)")
+# A value only the shell can resolve: an expansion anywhere, or a leading tilde.
+_SHELL_EXPANSION = re.compile(r"~|.*[$`]")
 
 
 def lora_file(out_dir: Path) -> Path:
     """Where the run of the ``train.sh`` forged in *out_dir* writes its LoRA.
 
-    Read from the script's ``--output_dir=`` flag (the last one wins, as in
-    argparse), so a hand-edited script is followed: that file is what ran.
+    Read from the script's ``--output_dir=PATH`` or ``--output_dir PATH`` flag
+    (the last one wins, as in argparse), so a hand-edited script is followed:
+    that file is what ran. A relative path is anchored to *out_dir*, the run's
+    working directory. It is returned relative, for the caller to refuse, when
+    the script changes directory or the value needs the shell to expand it:
+    forge cannot tell where that lands.
     """
     script = out_dir / "train.sh"
     try:
@@ -39,6 +48,7 @@ def lora_file(out_dir: Path) -> Path:
     except (OSError, UnicodeDecodeError) as exc:
         raise ForgeError(f"cannot read {script}: {exc}") from exc
     found: str | None = None
+    changes_dir = False
     # Join backslash-continued lines first: the launch command spans many of
     # them, and shlex refuses a line ending in a lone backslash.
     for line in _CONTINUATION.sub(" ", text).splitlines():
@@ -46,12 +56,20 @@ def lora_file(out_dir: Path) -> Path:
             words = shlex.split(line, comments=True)
         except ValueError:
             continue
-        for word in words:
-            if word.startswith(_OUTPUT_FLAG):
-                found = word[len(_OUTPUT_FLAG) :]
+        for i, word in enumerate(words):
+            if _CHDIR.fullmatch(word):
+                changes_dir = True
+            elif word.startswith(f"{_OUTPUT_FLAG}="):
+                found = word[len(_OUTPUT_FLAG) + 1 :]
+            elif word == _OUTPUT_FLAG and i + 1 < len(words) and not words[i + 1].startswith("-"):
+                found = words[i + 1]
     if not found:
         raise ForgeError(f"{script} passes no {_OUTPUT_FLAG}")
-    return Path(found) / LORA_FILENAME
+    path = Path(found) / LORA_FILENAME
+    if path.is_absolute() or changes_dir or _SHELL_EXPANSION.match(found):
+        return path
+    # Collapse "..", so a path leaving the export never looks like one inside it.
+    return Path(os.path.normpath(out_dir / path))
 
 
 def _caption_for(ctx: EmitContext, image_abs: str) -> str:

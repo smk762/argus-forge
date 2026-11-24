@@ -78,6 +78,66 @@ def test_diffusers_locator_takes_the_last_output_dir(tmp_path: Path) -> None:
     assert LORA_LOCATORS["diffusers"](tmp_path) == Path("/a b/pytorch_lora_weights.safetensors")
 
 
+@pytest.mark.parametrize(
+    "flags",
+    [
+        "--output_dir '/a b'",
+        "--output_dir=/first \\\n  --output_dir '/a b'",
+        "--output_dir /first --output_dir='/a b'",
+        "--output_dir \\\n  '/a b'",
+        "--output_dir='/a b' --output_dir --seed=42",
+    ],
+)
+def test_diffusers_locator_reads_the_space_separated_form(tmp_path: Path, flags: str) -> None:
+    (tmp_path / "train.sh").write_text(f"accelerate launch x.py {flags}\n", encoding="utf-8")
+    assert LORA_LOCATORS["diffusers"](tmp_path) == Path("/a b/pytorch_lora_weights.safetensors")
+
+
+def test_diffusers_locator_refuses_a_flag_without_a_value(tmp_path: Path) -> None:
+    (tmp_path / "train.sh").write_text("accelerate launch x.py --output_dir\n", encoding="utf-8")
+    with pytest.raises(ForgeError, match="passes no --output_dir"):
+        LORA_LOCATORS["diffusers"](tmp_path)
+
+
+def test_relative_diffusers_output_is_found_in_the_run_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    export = forge_stub(tmp_path, "diffusers", "accelerate launch x.py --output_dir=output\n")
+    lora = export / "forge/diffusers/output/pytorch_lora_weights.safetensors"
+    lora.parent.mkdir()
+    lora.write_bytes(LORA_BYTES)
+    monkeypatch.chdir(tmp_path)  # the server's own cwd must not matter
+    req = RunRequest(export_dir=str(export), trainer="diffusers")
+    assert prepare_run(req)[1] == str(lora.parent.parent)  # where the script, so the path, starts
+    art = lora_artifact(req)
+    assert art.path == str(lora)
+    assert art.export_path == "forge/diffusers/output/pytorch_lora_weights.safetensors"
+
+
+def test_relative_diffusers_output_leaving_the_export_has_no_export_path(tmp_path: Path) -> None:
+    export = forge_stub(tmp_path, "diffusers", "accelerate launch x.py --output_dir ../../../loras\n")
+    lora = tmp_path / "loras" / "pytorch_lora_weights.safetensors"
+    lora.parent.mkdir()
+    lora.write_bytes(LORA_BYTES)
+    art = lora_artifact(RunRequest(export_dir=str(export), trainer="diffusers"))
+    assert art.path == str(lora) and art.export_path is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "cd ~/diffusers\naccelerate launch x.py --output_dir=output\n",
+        "(cd /x && accelerate launch x.py --output_dir=output)\n",
+        'accelerate launch x.py --output_dir="$OUT"\n',
+        "accelerate launch x.py --output_dir ~/out\n",
+    ],
+)
+def test_diffusers_output_only_the_shell_can_place_is_refused(tmp_path: Path, body: str) -> None:
+    export = forge_stub(tmp_path, "diffusers", body)
+    with pytest.raises(ForgeError, match="relative LoRA output"):
+        lora_artifact(RunRequest(export_dir=str(export), trainer="diffusers"))
+
+
 # --- finding and hashing it ---
 
 
@@ -218,6 +278,33 @@ def test_foreign_and_broken_records_are_skipped(tmp_path: Path) -> None:
     other = RunState(run_id="c" * 32, trainer="kohya", export_dir="/x", status="failed", started_at="t")
     (runs / ("d" * 32 + ".json")).write_text(other.model_dump_json())  # id doesn't match its file
     assert RunStore(tmp_path).load() == []
+
+
+async def test_an_unserializable_record_is_logged_not_raised(tmp_path: Path) -> None:
+    """A path that isn't valid UTF-8 reaches the record as surrogates, which JSON can't encode."""
+    job = _job(_kohya_run(tmp_path), RunStore(tmp_path / "state"))
+    job.cwd = "/not-utf8-\udcff"
+    job._finalize("failed")
+    assert job.finished and job.status == "failed"
+
+
+async def test_a_failed_save_still_releases_stream_viewers(tmp_path: Path) -> None:
+    class BrokenStore(RunStore):
+        def save(self, state: RunState) -> None:
+            raise RuntimeError("store broke")
+
+    job = _job(_kohya_run(tmp_path), BrokenStore(tmp_path / "state"))
+
+    async def drain() -> list:
+        return [ev async for ev in job.subscribe()]
+
+    viewer = asyncio.create_task(drain())
+    await asyncio.sleep(0)  # let it register and park
+    assert job._subscribers
+    with pytest.raises(RuntimeError, match="store broke"):
+        job._finalize("failed")
+    assert await asyncio.wait_for(viewer, timeout=5) == []
+    assert not job._subscribers
 
 
 async def test_eviction_deletes_the_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

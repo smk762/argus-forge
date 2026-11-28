@@ -75,11 +75,27 @@ INTERRUPTED_MESSAGE = (
 _RUN_ID = re.compile(r"[0-9a-f]{32}")
 
 
+def _fsync_dir(directory: Path) -> None:
+    """Make a rename in *directory* durable (a no-op where directories can't be opened)."""
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError as exc:
+        logger.debug("run_dir_fsync_skipped", dir=str(directory), error=repr(exc))
+        return
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        logger.warning("run_dir_fsync_failed", dir=str(directory), error=repr(exc))
+    finally:
+        os.close(fd)
+
+
 class RunStore:
     """Run records on disk: ``<state_dir>/runs/<run_id>.json``, one RunState each.
 
-    Writes are atomic (a temp file renamed over the record), so a crash mid-save
-    leaves the previous record, never half of one. A failure to save is logged,
+    Writes are atomic and durable (a temp file, fsynced, renamed over the record,
+    then the directory fsynced), so a crash mid-save leaves the previous record,
+    never half of one. A failure to save is logged,
     not raised: losing a record must not fail or wedge the run it describes.
     """
 
@@ -94,8 +110,15 @@ class RunStore:
         tmp = path.with_name(f".{path.name}.tmp")
         try:
             self.dir.mkdir(parents=True, exist_ok=True)
-            tmp.write_text(state.model_dump_json(), encoding="utf-8")
+            data = state.model_dump_json().encode("utf-8")
+            with tmp.open("wb") as fh:
+                fh.write(data)
+                fh.flush()
+                # The data must be on disk before the rename is: otherwise a
+                # crash can persist the rename over an empty or short file.
+                os.fsync(fh.fileno())
             os.replace(tmp, path)
+            _fsync_dir(self.dir)
         except (OSError, ValueError) as exc:  # ValueError: text that isn't valid UTF-8 (a path's surrogates)
             logger.error("run_record_save_failed", run_id=state.run_id, error=repr(exc))
 

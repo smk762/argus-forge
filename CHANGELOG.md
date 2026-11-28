@@ -118,6 +118,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A diffusers run whose hand-edited `train.sh` passes a relative `--output_dir` now reports its LoRA, read from the
   run's own directory. It is still refused when the script changes directory or the value needs shell expansion.
 - `--output_dir PATH` (space-separated) in a diffusers `train.sh` is read like `--output_dir=PATH`.
+- An absolute `--output_dir` in a diffusers `train.sh` has its `..` collapsed like a relative one, so a path that
+  leaves the export through it no longer gets an `export_path` as if it were inside. An absolute-looking value that
+  needs shell expansion (`/runs/$RUN_ID`) is refused, like a relative one, instead of being opened literally.
+- A run record is fsynced before it is renamed into place, and its directory after, so a crash can no longer leave
+  an empty record where the old one was.
 - A run record that cannot be saved no longer leaves `/run/{id}/stream` viewers hanging, and one holding a path that
   is not valid UTF-8 is logged instead of raising.
 

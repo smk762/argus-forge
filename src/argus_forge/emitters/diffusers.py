@@ -38,9 +38,10 @@ def lora_file(out_dir: Path) -> Path:
     Read from the script's ``--output_dir=PATH`` or ``--output_dir PATH`` flag
     (the last one wins, as in argparse), so a hand-edited script is followed:
     that file is what ran. A relative path is anchored to *out_dir*, the run's
-    working directory. It is returned relative, for the caller to refuse, when
-    the script changes directory or the value needs the shell to expand it:
-    forge cannot tell where that lands.
+    working directory, and ".." is collapsed either way. It is returned
+    relative, for the caller to refuse, when the value needs the shell to expand
+    it (absolute-looking or not), or is relative and the script changes
+    directory: forge cannot tell where that lands.
     """
     script = out_dir / "train.sh"
     try:
@@ -65,11 +66,16 @@ def lora_file(out_dir: Path) -> Path:
                 found = words[i + 1]
     if not found:
         raise ForgeError(f"{script} passes no {_OUTPUT_FLAG}")
+    if _SHELL_EXPANSION.match(found):
+        # Relative even when it starts with "/": the expansion decides where it
+        # lands, so the caller must refuse it rather than open the literal path.
+        return Path(found.lstrip("/")) / LORA_FILENAME
     path = Path(found) / LORA_FILENAME
-    if path.is_absolute() or changes_dir or _SHELL_EXPANSION.match(found):
+    if changes_dir and not path.is_absolute():
         return path
-    # Collapse "..", so a path leaving the export never looks like one inside it.
-    return Path(os.path.normpath(out_dir / path))
+    # Collapse "..", absolute or not, so a path leaving the export never looks
+    # like one inside it.
+    return Path(os.path.normpath(path if path.is_absolute() else out_dir / path))
 
 
 def _caption_for(ctx: EmitContext, image_abs: str) -> str:

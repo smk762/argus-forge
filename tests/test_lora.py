@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import time
 from pathlib import Path
 
@@ -123,6 +124,28 @@ def test_relative_diffusers_output_leaving_the_export_has_no_export_path(tmp_pat
     assert art.path == str(lora) and art.export_path is None
 
 
+def test_absolute_diffusers_output_leaving_the_export_has_no_export_path(tmp_path: Path) -> None:
+    """An absolute --output_dir spelled through the export but leaving it with ".." is not inside it."""
+    export = tmp_path / "exp"
+    forge_stub(tmp_path, "diffusers", f"accelerate launch x.py --output_dir={export}/forge/../../loras\n")
+    lora = tmp_path / "loras" / "pytorch_lora_weights.safetensors"
+    lora.parent.mkdir()
+    lora.write_bytes(LORA_BYTES)
+    art = lora_artifact(RunRequest(export_dir=str(export), trainer="diffusers"))
+    assert art.path == str(lora) and art.export_path is None
+
+
+def test_absolute_diffusers_output_after_a_cd_is_still_followed(tmp_path: Path) -> None:
+    """A cd moves where a relative path lands, never an absolute one."""
+    export = tmp_path / "exp"
+    out = export / "forge/diffusers/abs"
+    forge_stub(tmp_path, "diffusers", f"cd /\naccelerate launch x.py --output_dir={out}\n")
+    out.mkdir()
+    (out / "pytorch_lora_weights.safetensors").write_bytes(LORA_BYTES)
+    art = lora_artifact(RunRequest(export_dir=str(export), trainer="diffusers"))
+    assert art.export_path == "forge/diffusers/abs/pytorch_lora_weights.safetensors"
+
+
 @pytest.mark.parametrize(
     "body",
     [
@@ -130,6 +153,9 @@ def test_relative_diffusers_output_leaving_the_export_has_no_export_path(tmp_pat
         "(cd /x && accelerate launch x.py --output_dir=output)\n",
         'accelerate launch x.py --output_dir="$OUT"\n',
         "accelerate launch x.py --output_dir ~/out\n",
+        # Absolute-looking, but the shell decides where it lands.
+        'accelerate launch x.py --output_dir="/runs/$RUN_ID"\n',
+        "accelerate launch x.py --output_dir=/runs/`date +%s`\n",
     ],
 )
 def test_diffusers_output_only_the_shell_can_place_is_refused(tmp_path: Path, body: str) -> None:
@@ -268,6 +294,27 @@ async def test_a_cancelled_run_is_restored_cancelled(tmp_path: Path) -> None:
     await registry.shutdown()  # a graceful stop cancels, then saves
     restored = JobRegistry(tmp_path / "state").get(job.run_id)
     assert restored is not None and restored.status == "cancelled"
+
+
+def test_a_record_is_on_disk_before_it_is_renamed_into_place(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without an fsync first, a crash can persist the rename over an empty file and lose the record."""
+    calls: list[str] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(fd: int) -> None:
+        calls.append("fsync-dir" if Path(f"/proc/self/fd/{fd}").resolve().is_dir() else "fsync-file")
+        real_fsync(fd)
+
+    def replace(src: object, dst: object) -> None:
+        calls.append("replace")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "replace", replace)
+    state = RunState(run_id="e" * 32, trainer="kohya", export_dir="/x", status="failed", started_at="t")
+    RunStore(tmp_path).save(state)
+    assert calls == ["fsync-file", "replace", "fsync-dir"]
+    assert RunStore(tmp_path).load() == [state]
 
 
 def test_foreign_and_broken_records_are_skipped(tmp_path: Path) -> None:
